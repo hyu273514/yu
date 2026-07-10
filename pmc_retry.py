@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import csv, hashlib, io, json, tarfile, time, zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
@@ -7,16 +8,16 @@ from pypdf import PdfReader
 
 PMCIDS=['PMC10046729','PMC10105630','PMC10116981','PMC10132484','PMC10136624','PMC10219546','PMC10231305','PMC10302809','PMC10331632','PMC10471902','PMC10493630','PMC10597714','PMC10789606','PMC11098544','PMC11455860','PMC11464026','PMC11477254','PMC11564285','PMC11968381','PMC12640654','PMC2699173','PMC2846828','PMC2848314','PMC3250580','PMC3312594','PMC3360444','PMC3618744','PMC3652961','PMC3975551','PMC4221774','PMC4647018','PMC4881317','PMC4977739','PMC5063726','PMC5337595','PMC5550312','PMC5554813','PMC5787654','PMC5954889','PMC6081282','PMC6265171','PMC6331292','PMC6331298','PMC6374080','PMC6374094','PMC6486127','PMC6750779','PMC6929568','PMC6942543','PMC6956409','PMC7040130','PMC7108032','PMC7118881','PMC7154615','PMC7224431','PMC7335535','PMC7669319','PMC7752060','PMC7947742','PMC8002749','PMC8134171','PMC8148678','PMC8314660','PMC8356106','PMC8726361','PMC8728675','PMC8933266','PMC9122763','PMC9445910']
 OUT=Path('results_pmc');PDF=OUT/'pdf';PDF.mkdir(parents=True,exist_ok=True)
-S=requests.Session();S.headers['User-Agent']='Mozilla/5.0 ENT-PMC-Retry/1.0'
+HEADERS={'User-Agent':'Mozilla/5.0 ENT-PMC-Retry/1.1'}
 
 def get(url):
     last=None
-    for i in range(4):
+    for i in range(3):
         try:
-            r=S.get(url,timeout=(20,120),allow_redirects=True)
-            if r.status_code==429:time.sleep(3+i*3);continue
+            r=requests.get(url,headers=HEADERS,timeout=(15,90),allow_redirects=True)
+            if r.status_code==429:time.sleep(2+i*2);continue
             r.raise_for_status();return r
-        except Exception as e:last=e;time.sleep(1+i*2)
+        except Exception as e:last=e;time.sleep(0.7+i*1.5)
     raise last
 
 def valid_pdf(data):
@@ -60,7 +61,6 @@ def download_one(pmcid):
                         return {**m,'pmcid':pmcid,'status':'成功','pages':pages,'size':len(data),'sha256':hashlib.sha256(data).hexdigest(),'source':href,'path':str(path)}
             except Exception as e:errors.append(repr(e)[:180])
     except Exception as e:errors.append(repr(e)[:180])
-    # fallback: parse canonical PMC HTML for citation_pdf_url/links
     try:
         page=get(f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/')
         soup=BeautifulSoup(page.content,'html.parser');urls=[]
@@ -81,11 +81,16 @@ def download_one(pmcid):
 
 def main():
     rows=[]
-    for i,p in enumerate(PMCIDS,1):
-        r=download_one(p);rows.append(r);print(f'[{i}/{len(PMCIDS)}] {r["status"]} {p} {r.get("title","")[:70]}',flush=True)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        jobs={pool.submit(download_one,p):p for p in PMCIDS}
+        for i,fut in enumerate(as_completed(jobs),1):
+            p=jobs[fut]
+            try:r=fut.result()
+            except Exception as e:r={'pmcid':p,'status':'失败','error':repr(e)}
+            rows.append(r);print(f'[{i}/{len(PMCIDS)}] {r["status"]} {p} {r.get("title","")[:70]}',flush=True)
+    rows.sort(key=lambda r:r.get('pmcid',''))
     fields=sorted({k for r in rows for k in r})
     with open(OUT/'report.csv','w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(rows)
-    # zip into <=45 MB groups
     files=sorted(PDF.glob('*.pdf'));groups=[];cur=[];size=0
     for p in files:
         if cur and size+p.stat().st_size>45*1024*1024:groups.append(cur);cur=[];size=0
