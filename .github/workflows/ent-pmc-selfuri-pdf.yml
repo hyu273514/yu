@@ -1,0 +1,178 @@
+name: ENT PMC Exact PDF Retrieval
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pmc_selfuri.trigger'
+      - '.github/workflows/ent-pmc-selfuri-pdf.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf
+      - name: Retrieve exact PMC PDF self-uri files
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, time, urllib.parse
+          import requests
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+
+          pmcids = [
+              'PMC4221774','PMC10105630','PMC6374094','PMC5337595','PMC6374080',
+              'PMC2699173','PMC6956409','PMC3975551','PMC10128256','PMC7335535',
+              'PMC7040130','PMC6942543','PMC2846828','PMC3577950','PMC5320920',
+              'PMC6265171','PMC3360444','PMC6954440','PMC3183377','PMC7108032',
+              'PMC4593511','PMC10997336','PMC3498014','PMC5550312','PMC11455860',
+              'PMC7154615','PMC6486127','PMC4466798','PMC10231305','PMC2943809',
+              'PMC6081282','PMC7145142','PMC8314660','PMC3618744','PMC3312594',
+              'PMC8134171'
+          ]
+          numbers = [re.sub(r'\D', '', value) for value in pmcids]
+          out = pathlib.Path('pmc_selfuri_results')
+          pdfroot = out / 'pdf'
+          pdfroot.mkdir(parents=True)
+          session = requests.Session()
+          session.headers.update({'User-Agent': 'ENT-PMC-Exact-PDF/1.0 contact@example.com', 'Accept': 'application/pdf,text/html;q=0.8,*/*;q=0.5'})
+
+          efetch_url = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
+          response = None
+          for attempt in range(6):
+              response = session.post(efetch_url, data={'db': 'pmc', 'id': ','.join(numbers), 'retmode': 'xml'}, timeout=(20, 180))
+              if response.status_code != 429:
+                  response.raise_for_status()
+                  break
+              time.sleep(4 + attempt * 5)
+          if response is None or response.status_code == 429:
+              raise SystemExit('NCBI batch EFetch remained rate limited')
+          soup = BeautifulSoup(response.content, 'xml')
+          article_map = {}
+          for article in soup.find_all('article'):
+              node = article.find('article-id', attrs={'pub-id-type': 'pmcid'})
+              if node:
+                  article_map[node.get_text(' ', strip=True).upper()] = article
+
+          def valid_pdf(data):
+              if not data.lstrip().startswith(b'%PDF-'):
+                  return None
+              try:
+                  reader = PdfReader(io.BytesIO(data), strict=False)
+                  pages = len(reader.pages)
+                  if pages < 1:
+                      return None
+                  metadata_title = ''
+                  try:
+                      metadata_title = str((reader.metadata or {}).get('/Title', '') or '')
+                  except Exception:
+                      pass
+                  return pages, metadata_title
+              except Exception:
+                  return None
+
+          def safe(value, limit=180):
+              value = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', '_', value or '')
+              return re.sub(r'\s+', '_', value).strip('._ ')[:limit] or 'untitled'
+
+          def article_meta(article, pmcid):
+              title_node = article.find('article-title')
+              title = title_node.get_text(' ', strip=True) if title_node else pmcid
+              doi_node = article.find('article-id', attrs={'pub-id-type': 'doi'})
+              pmid_node = article.find('article-id', attrs={'pub-id-type': 'pmid'})
+              year_node = article.find('pub-date')
+              year = year_node.find('year').get_text(' ', strip=True) if year_node and year_node.find('year') else ''
+              doi = doi_node.get_text(' ', strip=True) if doi_node else ''
+              pmid = pmid_node.get_text(' ', strip=True) if pmid_node else ''
+              hrefs = []
+              for node in article.find_all('self-uri'):
+                  href = node.get('xlink:href') or node.get('href')
+                  ctype = (node.get('content-type') or '').lower()
+                  xtitle = (node.get('xlink:title') or '').lower()
+                  if href and ('pdf' in ctype or 'pdf' in xtitle or href.lower().endswith('.pdf')):
+                      if href not in hrefs:
+                          hrefs.append(href)
+              return title, doi, pmid, year, hrefs
+
+          def candidates(pmcid, href):
+              quoted = urllib.parse.quote(href, safe='._-()')
+              return [
+                  f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/{quoted}',
+                  f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/bin/{quoted}',
+                  f'https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/bin/{quoted}',
+                  f'https://europepmc.org/articles/{pmcid}/bin/{quoted}',
+                  f'https://europepmc.org/articles/{pmcid}/pdf/{quoted}',
+                  f'https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf'
+              ]
+
+          results = []
+          for index, pmcid in enumerate(pmcids, 1):
+              result = {'pmcid': pmcid, 'status': 'failed', 'title': '', 'doi': '', 'pmid': '', 'year': '', 'pdf_hrefs': '', 'source_url': '', 'path': '', 'pages': '', 'size_bytes': '', 'sha256': '', 'pdf_metadata_title': '', 'error': ''}
+              article = article_map.get(pmcid)
+              if article is None:
+                  result['error'] = 'PMCID not returned by EFetch.'
+                  results.append(result)
+                  continue
+              title, doi, pmid, year, hrefs = article_meta(article, pmcid)
+              result.update({'title': title, 'doi': doi, 'pmid': pmid, 'year': year, 'pdf_hrefs': ' | '.join(hrefs)})
+              errors = []
+              seen = set()
+              for href in hrefs:
+                  for url in candidates(pmcid, href):
+                      if url in seen:
+                          continue
+                      seen.add(url)
+                      try:
+                          r = session.get(url, timeout=(15, 75), allow_redirects=True)
+                          data = r.content
+                          info = valid_pdf(data)
+                          if info:
+                              filename = safe(f'{year or "year_unknown"}_{title}_{pmcid}_PMC_original') + '.pdf'
+                              path = pdfroot / filename
+                              path.write_bytes(data)
+                              result.update({'status': 'success', 'source_url': r.url, 'path': str(path), 'pages': info[0], 'size_bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'pdf_metadata_title': info[1], 'error': ''})
+                              break
+                          errors.append(f'{r.status_code} {r.headers.get("content-type", "")} {url}')
+                      except Exception as exc:
+                          errors.append(f'{type(exc).__name__}: {str(exc)[:100]} {url}')
+                  if result['status'] == 'success':
+                      break
+              if not hrefs:
+                  errors.append('No PDF self-uri in EFetch XML.')
+              result['error'] = ' | '.join(errors[-12:])[:5000] if result['status'] != 'success' else ''
+              results.append(result)
+              print(f'[{index}/{len(pmcids)}] {result["status"]} {pmcid} hrefs={len(hrefs)} pages={result.get("pages")}', flush=True)
+
+          fields = list(results[0].keys())
+          with open(out / 'report.csv', 'w', encoding='utf-8-sig', newline='') as file:
+              writer = csv.DictWriter(file, fieldnames=fields)
+              writer.writeheader()
+              writer.writerows(results)
+          summary = {
+              'total': len(results),
+              'with_pdf_self_uri': sum(bool(item['pdf_hrefs']) for item in results),
+              'success': sum(item['status'] == 'success' for item in results),
+              'failed': sum(item['status'] != 'success' for item in results),
+              'pages': sum(int(item.get('pages') or 0) for item in results),
+              'bytes': sum(int(item.get('size_bytes') or 0) for item in results)
+          }
+          (out / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+          print(summary)
+          PY
+      - name: Upload exact PDF results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pmc-selfuri-results
+          path: pmc_selfuri_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
