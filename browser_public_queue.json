@@ -1,0 +1,138 @@
+[
+  {
+    "id":"PMC7108032",
+    "title":"Clinical Practice Guideline for the Diagnosis and Management of Group A Streptococcal Pharyngitis: 2012 Update by the Infectious Diseases Society of America",
+    "doi":"10.1093/cid/cis629",
+    "specialty":"咽喉科","disease":"急性咽炎；急性扁桃体炎",
+    "landings":["https://www.idsociety.org/practice-guideline/streptococcal-pharyngitis/","https://academic.oup.com/cid/article/55/10/e86/321183"],
+    "pdf_candidates":["https://academic.oup.com/cid/article-pdf/55/10/e86/17350181/cis629.pdf"]
+  },
+  {
+    "id":"PMC6954440",
+    "title":"EANO guideline on the diagnosis and treatment of vestibular schwannoma",
+    "doi":"10.1093/neuonc/noz153",
+    "specialty":"耳科","disease":"听神经瘤",
+    "landings":["https://academic.oup.com/neuro-oncology/article/22/1/31/5555902"],
+    "pdf_candidates":["https://academic.oup.com/neuro-oncology/article-pdf/22/1/31/31789998/noz153.pdf","https://academic.oup.com/neuro-oncology/advance-article-pdf/doi/10.1093/neuonc/noz153/30623392/noz153.pdf"]
+  },
+  {
+    "id":"PMC3360444",
+    "title":"Globus pharyngeus: A review of its etiology, diagnosis and treatment",
+    "doi":"10.3748/wjg.v18.i20.2462",
+    "specialty":"咽喉科","disease":"慢性咽炎",
+    "landings":["https://www.wjgnet.com/1007-9327/full/v18/i20/2462.htm"],
+    "pdf_candidates":["https://www.wjgnet.com/1007-9327/PDF/v18/i20/2462.pdf"]
+  },
+  {
+    "id":"PMC8134171",
+    "title":"When Is the Vestibular Aqueduct Enlarged? A Statistical Analysis of the Normative Distribution of Vestibular Aqueduct Size",
+    "doi":"10.3174/ajnr.A0495",
+    "specialty":"耳科","disease":"前庭导水管扩大综合征",
+    "landings":["https://www.ajnr.org/content/28/6/1133","https://www.ajnr.org/lookup/doi/10.3174/ajnr.A0495"],
+    "pdf_candidates":["https://www.ajnr.org/content/ajnr/28/6/1133.full.pdf"]
+  },
+  {
+    "id":"AAP_AOM_2013",
+    "title":"The Diagnosis and Management of Acute Otitis Media",
+    "doi":"10.1542/peds.2012-3488",
+    "specialty":"耳科","disease":"急性中耳炎",
+    "landings":["https://doi.org/10.1542/peds.2012-3488","https://publications.aap.org/pediatrics/article/131/3/e964/30912/The-Diagnosis-and-Management-of-Acute-Otitis"],
+    "pdf_candidates":[]
+  },
+  {
+    "id":"PMC7154615",
+    "title":"Recommendations for Management of Acute Pharyngitis in Adults",
+    "doi":"10.1016/j.otoeng.2015.05.003",
+    "specialty":"咽喉科","disease":"急性咽炎",
+    "landings":["https://www.elsevier.es/en-revista-acta-otorrinolaringologica-espanola-402-articulo-recommendations-for-management-acute-pharyngitis-S2173573515000423","https://doi.org/10.1016/j.otoeng.2015.05.003"],
+    "pdf_candidates":["https://www.elsevier.es/en-revista-acta-otorrinolaringologica-espanola-402-pdf-S2173573515000423"]
+  },
+  {
+    "id":"PMC3975551",
+    "title":"Bilateral vocal cord palsy post thyroidectomy: lessons learnt",
+    "doi":"10.1136/bcr-2013-201033",
+    "specialty":"咽喉科","disease":"声带麻痹",
+    "landings":["https://doi.org/10.1136/bcr-2013-201033","https://casereports.bmj.com/content/2014/bcr-2013-201033"],
+    "pdf_candidates":["https://casereports.bmj.com/content/2014/bcr-2013-201033.full.pdf"]
+  },
+  {
+    "id":"PMC3618744",
+    "title":"Rare but numerous serious complications of acute otitis media in a 3-year-old child",
+    "doi":"10.1136/bcr-2012-008149",
+    "specialty":"耳科","disease":"急性中耳炎",
+    "landings":["https://doi.org/10.1136/bcr-2012-008149","https://casereports.bmj.com/content/2013/bcr-2012-008149"],
+    "pdf_candidates":["https://casereports.bmj.com/content/2013/bcr-2012-008149.full.pdf"]
+  },
+  {
+    "id":"PMC3312594",
+    "title":"Vestibular Schwannoma in Patients with Sudden Sensorineural Hearing Loss",
+    "doi":"10.1055/s-0030-1261257",
+    "specialty":"耳科","disease":"听神经瘤",
+    "landings":["https://www.thieme-connect.de/products/ejournals/html/10.1055/s-0030-1261257","https://doi.org/10.1055/s-0030-1261257"],
+    "pdf_candidates":["https://www.thieme-connect.de/products/ejournals/pdf/10.1055/s-0030-1261257.pdf"]
+  },
+  {
+    "id":"PMC5550312",
+    "title":"Otologic and Audiology Concerns of Microtia Repair",
+    "doi":"10.1055/s-0037-1603957",
+    "specialty":"耳科","disease":"小耳畸形及耳廓发育异常",
+    "landings":["https://www.thieme-connect.de/products/ejournals/html/10.1055/s-0037-1603957","https://doi.org/10.1055/s-0037-1603957"],
+    "pdf_candidates":["https://www.thieme-connect.de/products/ejournals/pdf/10.1055/s-0037-1603957.pdf"]
+  },
+  {
+    "id":"PMC4221774",
+    "title":"A study of acute otitis externa at Wellington Hospital, 2007-2011",
+    "doi":"10.4066/AMJ.2014.2094",
+    "specialty":"耳科","disease":"急性外耳道炎",
+    "landings":["https://doi.org/10.4066/AMJ.2014.2094","https://amj.net.au/index.php/AMJ"],
+    "pdf_candidates":[]
+  },
+  {
+    "id":"PMC2699173",
+    "title":"Clinical Guideline for the Evaluation, Management and Long-term Care of Obstructive Sleep Apnea in Adults",
+    "doi":"10.5664/jcsm.27497",
+    "specialty":"咽喉科","disease":"阻塞性睡眠呼吸暂停低通气综合征",
+    "landings":["https://doi.org/10.5664/jcsm.27497","https://jcsm.aasm.org/doi/10.5664/jcsm.27497"],
+    "pdf_candidates":[]
+  },
+  {
+    "id":"PMC3577950",
+    "title":"Long-Term Results of RTOG 91-11: A Comparison of Three Nonsurgical Treatment Strategies to Preserve the Larynx in Patients With Locally Advanced Larynx Cancer",
+    "doi":"10.1200/JCO.2012.43.6097",
+    "specialty":"咽喉科","disease":"喉癌",
+    "landings":["https://doi.org/10.1200/JCO.2012.43.6097","https://ascopubs.org/doi/10.1200/JCO.2012.43.6097"],
+    "pdf_candidates":[]
+  },
+  {
+    "id":"PMC5320920",
+    "title":"Organ Preservation for Advanced Larynx Cancer: Issues and Outcomes",
+    "doi":"10.1200/JCO.2015.61.2978",
+    "specialty":"咽喉科","disease":"喉癌",
+    "landings":["https://doi.org/10.1200/JCO.2015.61.2978","https://ascopubs.org/doi/10.1200/JCO.2015.61.2978"],
+    "pdf_candidates":[]
+  },
+  {
+    "id":"PMC6081282",
+    "title":"Squamous Cell Carcinoma of the External Auditory Canal and Temporal Bone: An Update",
+    "doi":"10.1007/s12105-018-0908-4",
+    "specialty":"耳科","disease":"外耳道恶性肿瘤",
+    "landings":["https://link.springer.com/article/10.1007/s12105-018-0908-4"],
+    "pdf_candidates":["https://link.springer.com/content/pdf/10.1007/s12105-018-0908-4.pdf"]
+  },
+  {
+    "id":"PMC7040130",
+    "title":"Spontaneous External Auditory Canal Cholesteatoma: Case Series and Review of Literature",
+    "doi":"10.1007/s12070-019-01755-2",
+    "specialty":"耳科","disease":"外耳道胆脂瘤",
+    "landings":["https://link.springer.com/article/10.1007/s12070-019-01755-2"],
+    "pdf_candidates":["https://link.springer.com/content/pdf/10.1007/s12070-019-01755-2.pdf"]
+  },
+  {
+    "id":"PMC11455860",
+    "title":"Topical Antibiotic-Induced Otomycosis - a Systematic Review of Aetiology and Risk Factors",
+    "doi":"10.1007/s12070-024-04852-z",
+    "specialty":"耳科","disease":"外耳道真菌病",
+    "landings":["https://link.springer.com/article/10.1007/s12070-024-04852-z"],
+    "pdf_candidates":["https://link.springer.com/content/pdf/10.1007/s12070-024-04852-z.pdf"]
+  }
+]
