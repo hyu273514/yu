@@ -1,0 +1,165 @@
+name: ENT PMC OA API Retrieval
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pmc_oa_queue.json'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests lxml pypdf beautifulsoup4
+      - name: Retrieve official PMC OA packages
+        run: |
+          python - <<'PY'
+          import csv, hashlib, json, os, pathlib, re, shutil, tarfile, tempfile, time
+          import requests
+          from lxml import etree
+          from pypdf import PdfReader
+
+          rows = json.load(open('pmc_oa_queue.json', encoding='utf-8'))
+          out = pathlib.Path('pmc_oa_results')
+          pdfroot = out / 'pdf'
+          pkgroot = out / 'packages'
+          pdfroot.mkdir(parents=True, exist_ok=True)
+          pkgroot.mkdir(parents=True, exist_ok=True)
+          session = requests.Session()
+          session.headers.update({'User-Agent': 'ENT-Literature-Archive/1.0 alice246991@gmail.com'})
+
+          def safe(s, n=160):
+              s = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', '_', str(s or ''))
+              return re.sub(r'\s+', '_', s).strip('._ ')[:n] or 'untitled'
+
+          def pdf_info(path):
+              try:
+                  data = path.read_bytes()
+                  if not data.lstrip().startswith(b'%PDF-'):
+                      return None
+                  reader = PdfReader(path, strict=False)
+                  return len(reader.pages), len(data), hashlib.sha256(data).hexdigest()
+              except Exception:
+                  return None
+
+          def get_links(pmcid):
+              url = f'https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}'
+              r = session.get(url, timeout=(15, 45))
+              r.raise_for_status()
+              root = etree.fromstring(r.content)
+              error = root.find('.//error')
+              if error is not None:
+                  return url, [], ''.join(error.itertext()).strip()
+              links = []
+              for link in root.findall('.//link'):
+                  href = link.get('href') or ''
+                  fmt = link.get('format') or ''
+                  if href.startswith('ftp://'):
+                      href = 'https://' + href[len('ftp://'):]
+                  links.append((fmt, href))
+              return url, links, ''
+
+          def choose_pdf(extract_dir):
+              pdfs = list(extract_dir.rglob('*.pdf')) + list(extract_dir.rglob('*.PDF'))
+              valid = []
+              for p in pdfs:
+                  info = pdf_info(p)
+                  if info:
+                      valid.append((p, info))
+              if not valid:
+                  return None
+              valid.sort(key=lambda x: (x[1][0], x[1][1]), reverse=True)
+              return valid[0]
+
+          results = []
+          for idx, row in enumerate(rows, 1):
+              pmcid = row['pmcid']
+              result = {**row, 'status':'failed', 'method':'', 'oa_api_url':'', 'package_url':'', 'path':'', 'pages':'', 'size_bytes':'', 'sha256':'', 'error':''}
+              errors = []
+              try:
+                  api_url, links, api_error = get_links(pmcid)
+                  result['oa_api_url'] = api_url
+                  if api_error:
+                      errors.append('OA_API: ' + api_error)
+                  for fmt, href in links:
+                      if not href:
+                          continue
+                      try:
+                          rr = session.get(href, timeout=(20, 120), allow_redirects=True)
+                          rr.raise_for_status()
+                          result['package_url'] = rr.url
+                          if fmt.lower() == 'pdf' or rr.content.lstrip().startswith(b'%PDF-'):
+                              dest = pdfroot / safe(row['specialties'], 50) / safe(row['diseases'], 80)
+                              dest.mkdir(parents=True, exist_ok=True)
+                              path = dest / f'{pmcid}_{safe(row["titles"], 130)}_PMC_OA.pdf'
+                              path.write_bytes(rr.content)
+                              info = pdf_info(path)
+                              if info:
+                                  result.update(status='success', method='PMC_OA_API_pdf', path=str(path), pages=info[0], size_bytes=info[1], sha256=info[2])
+                                  break
+                              path.unlink(missing_ok=True)
+                          else:
+                              pkg = pkgroot / f'{pmcid}.tar.gz'
+                              pkg.write_bytes(rr.content)
+                              temp = pathlib.Path(tempfile.mkdtemp(prefix=pmcid+'_'))
+                              try:
+                                  with tarfile.open(pkg, 'r:*') as tf:
+                                      tf.extractall(temp, filter='data')
+                                  selected = choose_pdf(temp)
+                                  if selected:
+                                      src, info = selected
+                                      dest = pdfroot / safe(row['specialties'], 50) / safe(row['diseases'], 80)
+                                      dest.mkdir(parents=True, exist_ok=True)
+                                      path = dest / f'{pmcid}_{safe(row["titles"], 130)}_PMC_OA.pdf'
+                                      shutil.copy2(src, path)
+                                      result.update(status='success', method='PMC_OA_API_tgz', path=str(path), pages=info[0], size_bytes=info[1], sha256=info[2])
+                                      break
+                                  errors.append(f'{fmt}: package contained no valid PDF')
+                              finally:
+                                  shutil.rmtree(temp, ignore_errors=True)
+                      except Exception as e:
+                          errors.append(f'{fmt}:{type(e).__name__}:{str(e)[:220]}')
+                  if result['status'] != 'success' and not links and not api_error:
+                      errors.append('OA API returned no downloadable links')
+              except Exception as e:
+                  errors.append(f'OA_API:{type(e).__name__}:{str(e)[:300]}')
+              result['error'] = ' | '.join(errors)
+              results.append(result)
+              print(f'[{idx}/{len(rows)}] {result["status"]} {pmcid} {result.get("pages", "")}', flush=True)
+              time.sleep(0.35)
+
+          fields = []
+          for r in results:
+              for k in r:
+                  if k not in fields:
+                      fields.append(k)
+          with open(out/'report.csv', 'w', encoding='utf-8-sig', newline='') as f:
+              w = csv.DictWriter(f, fieldnames=fields)
+              w.writeheader(); w.writerows(results)
+          summary = {
+              'total': len(results),
+              'success': sum(r['status']=='success' for r in results),
+              'failed': sum(r['status']!='success' for r in results),
+              'pages': sum(int(r.get('pages') or 0) for r in results),
+              'bytes': sum(int(r.get('size_bytes') or 0) for r in results)
+          }
+          (out/'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+          print(summary)
+          PY
+      - name: Upload PMC OA results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pmc-oa-api-results
+          path: pmc_oa_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
