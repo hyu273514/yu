@@ -1,0 +1,32 @@
+name: ENT PubMed LinkOut XML
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'linkout_xml.trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 pypdf urllib3
+      - name: Run LinkOut XML retrieval
+        run: python pubmed_linkout_xml.py
+      - name: Upload LinkOut XML results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pubmed-linkout-xml-results
+          path: pubmed_linkout_xml_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
