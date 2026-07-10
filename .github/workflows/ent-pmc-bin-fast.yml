@@ -1,0 +1,89 @@
+name: ENT PMC Bin PDF Fast
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pmc_bin_fast_queue.json'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf urllib3
+      - name: Fast concurrent PMC bin retrieval
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          import requests, urllib3
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+          rows=json.load(open('pmc_bin_fast_queue.json',encoding='utf-8'))
+          out=pathlib.Path('pmc_bin_fast_results');pdfroot=out/'pdf';pdfroot.mkdir(parents=True,exist_ok=True)
+          ua={'User-Agent':'ENT-Literature-Archive/1.0 (mailto:alice246991@gmail.com)','Accept':'application/pdf,*/*;q=0.8'}
+          ids=','.join(r['pmcid'].upper().replace('PMC','') for r in rows if r.get('pmcid'))
+          xml=requests.get('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id='+ids+'&retmode=xml',headers=ua,timeout=(15,90)).content
+          (out/'batch.xml').write_bytes(xml);soup=BeautifulSoup(xml,'xml');hrefmap={}
+          for art in soup.find_all('article'):
+              aid={x.get('pub-id-type'):x.get_text(strip=True) for x in art.find_all('article-id')};pmc=(aid.get('pmcid') or aid.get('pmc') or '').upper();pmc=pmc if pmc.startswith('PMC') else ('PMC'+pmc if pmc else '')
+              hrefs=[]
+              for su in art.find_all('self-uri'):
+                  href=su.get('xlink:href') or su.get('href');typ=(su.get('content-type') or '').lower()
+                  if href and ('pdf' in typ or href.lower().endswith('.pdf')):hrefs.append(href)
+              hrefmap[pmc]=list(dict.fromkeys(hrefs))
+          def safe(x,n=150):
+              x=re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',str(x or ''));return re.sub(r'\s+','_',x).strip('._ ')[:n] or 'untitled'
+          def toks(x):return {w for w in re.findall(r'[a-z0-9]+',str(x).lower()) if len(w)>3 and w not in {'with','from','that','this','into','after','using','study','review','clinical','patients','guideline','pmcid'}}
+          def validate(data,title):
+              if not data.lstrip().startswith(b'%PDF-'):return None,'not_pdf'
+              try:
+                  reader=PdfReader(io.BytesIO(data),strict=False);pages=len(reader.pages);text=' '.join((reader.pages[i].extract_text() or '') for i in range(min(4,pages)));score=len(toks(title)&toks(text))/max(1,len(toks(title)))
+                  if text and score<0.18:return None,f'mismatch:{score:.2f}'
+                  return (pages,len(data),hashlib.sha256(data).hexdigest(),score),''
+              except Exception as e:return None,'pdf_error:'+repr(e)[:120]
+          def one(row):
+              pmc=row['pmcid'].upper();title=row.get('title','');hrefs=hrefmap.get(pmc,[]);errors=[]
+              ans={**row,'self_uri':' | '.join(hrefs),'status':'failed','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','match_score':'','error':''}
+              sess=requests.Session();sess.headers.update(ua)
+              for href in hrefs:
+                  q=urllib.parse.quote(href,safe='._-()')
+                  for url in [f'https://pmc.ncbi.nlm.nih.gov/articles/{pmc}/bin/{q}',f'https://www.ncbi.nlm.nih.gov/pmc/articles/{pmc}/bin/{q}',f'https://europepmc.org/articles/{pmc}/bin/{q}']:
+                      try:
+                          r=sess.get(url,timeout=(6,14),allow_redirects=True,verify=False);info,err=validate(r.content,title)
+                          if info:
+                              p=pdfroot/f'{safe(pmc,30)}_{safe(title)}.pdf';p.write_bytes(r.content);ans.update(status='success',source_url=r.url,path=str(p),pages=info[0],size_bytes=info[1],sha256=info[2],match_score=round(info[3],3),error='');return ans
+                          errors.append(f'{r.status_code}:{r.headers.get("content-type","")}:{err}:{r.url}')
+                      except Exception as e:errors.append(f'{type(e).__name__}:{str(e)[:100]}:{url}')
+              ans['error']=' | '.join(errors)[:10000];return ans
+          results=[]
+          with ThreadPoolExecutor(max_workers=8) as ex:
+              futs={ex.submit(one,r):r['pmcid'] for r in rows}
+              for i,f in enumerate(as_completed(futs),1):
+                  x=f.result();results.append(x);print(f'[{i}/{len(rows)}] {x["status"]} {x["pmcid"]} {x.get("pages","")}',flush=True)
+          results.sort(key=lambda x:x['pmcid']);fields=[]
+          for r in results:
+              for k in r:
+                  if k not in fields:fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          summary={'total':len(results),'with_self_uri':sum(bool(r.get('self_uri')) for r in results),'success':sum(r['status']=='success' for r in results),'failed':sum(r['status']!='success' for r in results),'pages':sum(int(r.get('pages') or 0) for r in results),'bytes':sum(int(r.get('size_bytes') or 0) for r in results)}
+          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          PY
+      - name: Upload fast bin results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pmc-bin-fast-results
+          path: pmc_bin_fast_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
