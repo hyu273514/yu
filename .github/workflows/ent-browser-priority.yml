@@ -1,0 +1,107 @@
+name: ENT Browser Priority Retrieval
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['browser_priority.trigger']
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install browser dependencies
+        run: |
+          pip install playwright pypdf
+          python -m playwright install --with-deps chromium
+      - name: Retrieve six priority public articles
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from playwright.sync_api import sync_playwright
+          from pypdf import PdfReader
+
+          items=[
+            {'id':'PMC7108032','title':'Clinical Practice Guideline for the Diagnosis and Management of Group A Streptococcal Pharyngitis: 2012 Update by the Infectious Diseases Society of America','urls':['https://www.idsociety.org/practice-guideline/streptococcal-pharyngitis/','https://academic.oup.com/cid/article/55/10/e86/321183'],'pdfs':['https://academic.oup.com/cid/article-pdf/55/10/e86/17350181/cis629.pdf']},
+            {'id':'PMC6954440','title':'EANO guideline on the diagnosis and treatment of vestibular schwannoma','urls':['https://academic.oup.com/neuro-oncology/article/22/1/31/5555902'],'pdfs':['https://academic.oup.com/neuro-oncology/article-pdf/22/1/31/31789998/noz153.pdf','https://academic.oup.com/neuro-oncology/advance-article-pdf/doi/10.1093/neuonc/noz153/30623392/noz153.pdf']},
+            {'id':'PMC3360444','title':'Globus pharyngeus: A review of its etiology, diagnosis and treatment','urls':['https://www.wjgnet.com/1007-9327/full/v18/i20/2462.htm'],'pdfs':['https://www.wjgnet.com/1007-9327/PDF/v18/i20/2462.pdf']},
+            {'id':'PMC8134171','title':'When Is the Vestibular Aqueduct Enlarged? A Statistical Analysis of the Normative Distribution of Vestibular Aqueduct Size','urls':['https://www.ajnr.org/content/28/6/1133'],'pdfs':['https://www.ajnr.org/content/ajnr/28/6/1133.full.pdf']},
+            {'id':'AAP_AOM_2013','title':'The Diagnosis and Management of Acute Otitis Media','urls':['https://doi.org/10.1542/peds.2012-3488','https://publications.aap.org/pediatrics/article/131/3/e964/30912/The-Diagnosis-and-Management-of-Acute-Otitis'],'pdfs':[]},
+            {'id':'PMC7154615','title':'Recommendations for Management of Acute Pharyngitis in Adults','urls':['https://www.elsevier.es/en-revista-acta-otorrinolaringologica-espanola-402-articulo-recommendations-for-management-acute-pharyngitis-S2173573515000423'],'pdfs':['https://www.elsevier.es/en-revista-acta-otorrinolaringologica-espanola-402-pdf-S2173573515000423']}
+          ]
+          out=pathlib.Path('priority_results'); pdfroot=out/'pdf'; pdfroot.mkdir(parents=True,exist_ok=True)
+          stop={'with','from','that','this','into','after','using','study','review','clinical','patients','guideline','management','treatment'}
+          reject=['verify you are human','recaptcha','captcha','access denied','preview of subscription content','purchase this article','buy now','you do not have access','institutional access required']
+          sections=['abstract','introduction','background','methods','results','discussion','conclusion','recommendations','references','diagnosis','treatment']
+          def toks(x):return {w for w in re.findall(r'[a-z0-9]+',(x or '').lower()) if len(w)>3 and w not in stop}
+          def safe(x):return re.sub(r'[^\w.-]+','_',x,flags=re.UNICODE)[:130]
+          def check(data,title,minp=2):
+            if not data or not data.lstrip().startswith(b'%PDF-'):return None
+            try:
+              r=PdfReader(io.BytesIO(data),strict=False);p=len(r.pages);t=' '.join((r.pages[i].extract_text() or '') for i in range(min(p,5)));s=len(toks(title)&toks(t))/max(1,len(toks(title)))
+              if p<minp or (t and s<.18):return None
+              return {'pages':p,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'score':round(s,3)}
+            except Exception:return None
+          def candidates(page):
+            vals=[]
+            for sel in ['meta[name="citation_pdf_url"]','meta[name="wkhealth_pdf_url"]','meta[property="og:pdf"]','link[type="application/pdf"]']:
+              for e in page.locator(sel).all():
+                v=e.get_attribute('content') or e.get_attribute('href')
+                if v:vals.append(urllib.parse.urljoin(page.url,v))
+            for e in page.locator('a[href]').all():
+              h=e.get_attribute('href') or '';txt=(e.inner_text(timeout=800) or '').lower()
+              if '.pdf' in h.lower() or '/pdf/' in h.lower() or 'download pdf' in txt or txt.strip()=='pdf':vals.append(urllib.parse.urljoin(page.url,h))
+            return list(dict.fromkeys(vals))[:40]
+          def one(item):
+            result={**item,'status':'failed','version':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','score':'','text_chars':'','sections':'','error':''};errs=[]
+            with sync_playwright() as pw:
+              b=pw.chromium.launch(headless=True,args=['--no-sandbox','--disable-dev-shm-usage']);c=b.new_context(user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36',locale='en-US',viewport={'width':1400,'height':1200});p=c.new_page()
+              for landing in item['urls']:
+                try:
+                  resp=p.goto(landing,wait_until='domcontentloaded',timeout=60000);p.wait_for_timeout(3500)
+                  pdfs=item['pdfs']+candidates(p)
+                  for u in list(dict.fromkeys(pdfs)):
+                    try:
+                      q=c.new_page();rr=q.goto(u,wait_until='domcontentloaded',timeout=50000,referer=p.url);data=rr.body() if rr else b'';info=check(data,item['title']);errs.append(f'pdf:{rr.status if rr else "none"}:{rr.url if rr else u}')
+                      if not info:
+                        ar=c.request.get(u,headers={'Referer':p.url,'Accept':'application/pdf,*/*;q=0.8'},timeout=50000,fail_on_status_code=False);data=ar.body();info=check(data,item['title']);errs.append(f'req:{ar.status}:{ar.url}')
+                      q.close()
+                      if info:
+                        f=pdfroot/f'{item["id"]}_{safe(item["title"])}_publisher.pdf';f.write_bytes(data);result.update(status='success',version='出版社/学会原版PDF',source_url=u,path=str(f),pages=info['pages'],size_bytes=info['bytes'],sha256=info['sha256'],score=info['score']);b.close();return result
+                    except Exception as e:errs.append('pdf_exc:'+type(e).__name__+':'+str(e)[:120])
+                  text=p.locator('body').inner_text(timeout=12000);low=text.lower();head=' '.join((x.inner_text(timeout=600) or '') for x in p.locator('h1,h2,h3').all());sec=sum(1 for x in sections if x in (head+' '+low).lower());sc=len(toks(item['title'])&toks(text))/max(1,len(toks(item['title'])));bad=[x for x in reject if x in low]
+                  if len(text)>=6500 and sec>=3 and sc>=.18 and not bad:
+                    data=p.pdf(format='A4',print_background=True,margin={'top':'12mm','bottom':'12mm','left':'12mm','right':'12mm'});info=check(data,item['title'],3)
+                    if info:
+                      f=pdfroot/f'{item["id"]}_{safe(item["title"])}_official_web.pdf';f.write_bytes(data);result.update(status='success',version='官方开放网页全文归档PDF',source_url=p.url,path=str(f),pages=info['pages'],size_bytes=info['bytes'],sha256=info['sha256'],score=info['score'],text_chars=len(text),sections=sec);b.close();return result
+                  errs.append(f'html:{p.url}:chars={len(text)}:sec={sec}:score={sc:.2f}:bad={bad}')
+                except Exception as e:errs.append('landing:'+type(e).__name__+':'+str(e)[:150]+':'+landing)
+              b.close()
+            result['error']=' | '.join(errs)[:20000];return result
+          results=[]
+          with ThreadPoolExecutor(max_workers=3) as ex:
+            fs={ex.submit(one,x):x['id'] for x in items}
+            for f in as_completed(fs):
+              r=f.result();results.append(r);print(r['id'],r['status'],r.get('version'),r.get('pages'),flush=True)
+          fields=[]
+          for r in results:
+            for k in r:
+              if k not in fields:fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          s={'total':len(results),'success':sum(x['status']=='success' for x in results),'publisher':sum(x.get('version')=='出版社/学会原版PDF' for x in results),'web':sum(x.get('version')=='官方开放网页全文归档PDF' for x in results),'pages':sum(int(x.get('pages') or 0) for x in results)};(out/'summary.json').write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding='utf-8');print(s)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ent-browser-priority-results
+          path: priority_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
