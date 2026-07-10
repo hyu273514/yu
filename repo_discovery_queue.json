@@ -1,0 +1,281 @@
+[
+  {
+    "key": "pmc:pmc4221774",
+    "pmcid": "PMC4221774",
+    "pmid": "25379060",
+    "doi": "10.4066/amj.2014.2094",
+    "title": "A study of acute otitis externa at Wellington Hospital, 2007-2011",
+    "specialty": "耳科",
+    "diseases": ["急性外耳道炎"]
+  },
+  {
+    "key": "pmc:pmc6374094",
+    "pmcid": "PMC6374094",
+    "pmid": "30736887",
+    "doi": "10.5664/jcsm.7640",
+    "title": "AASM PAP treatment guideline",
+    "specialty": "咽喉科",
+    "diseases": ["阻塞性睡眠呼吸暂停低通气综合征"]
+  },
+  {
+    "key": "pmc:pmc5337595",
+    "pmcid": "PMC5337595",
+    "pmid": "28162150",
+    "doi": "10.5664/jcsm.6506",
+    "title": "AASM adult OSA diagnostic testing guideline",
+    "specialty": "咽喉科",
+    "diseases": ["阻塞性睡眠呼吸暂停低通气综合征"]
+  },
+  {
+    "key": "pmc:pmc6374080",
+    "pmcid": "PMC6374080",
+    "pmid": "30736888",
+    "doi": "10.5664/jcsm.7638",
+    "title": "AASM systematic review for PAP treatment",
+    "specialty": "咽喉科",
+    "diseases": ["阻塞性睡眠呼吸暂停低通气综合征"]
+  },
+  {
+    "key": "pmc:pmc2699173",
+    "pmcid": "PMC2699173",
+    "pmid": "19960649",
+    "doi": "",
+    "title": "Adult OSA long-term care guideline",
+    "specialty": "咽喉科",
+    "diseases": ["阻塞性睡眠呼吸暂停低通气综合征"]
+  },
+  {
+    "key": "pmc:pmc6956409",
+    "pmcid": "PMC6956409",
+    "pmid": "18843734",
+    "doi": "10.1002/14651858.cd006851.pub2",
+    "title": "Antiviral therapy for Ramsay Hunt syndrome in adults",
+    "specialty": "耳科",
+    "diseases": ["Ramsay Hunt综合征"]
+  },
+  {
+    "key": "pmc:pmc3975551",
+    "pmcid": "PMC3975551",
+    "pmid": "24663247",
+    "doi": "10.1136/bcr-2013-201033",
+    "title": "Bilateral vocal cord palsy post thyroidectomy: lessons learnt",
+    "specialty": "咽喉科",
+    "diseases": ["声带麻痹"]
+  },
+  {
+    "key": "pmc:pmc10128256",
+    "pmcid": "PMC10128256",
+    "pmid": "",
+    "doi": "",
+    "title": "Clinical analysis and surgical treatment of congenital external auditory canal stenosis. PMC",
+    "specialty": "耳科",
+    "diseases": ["先天性外中耳畸形"]
+  },
+  {
+    "key": "pmc:pmc7040130",
+    "pmcid": "PMC7040130",
+    "pmid": "32158662",
+    "doi": "10.1007/s12070-019-01755-2",
+    "title": "Dhingra P, Pusalkar AG. Spontaneous External Auditory Canal Cholesteatoma: Case Series and Review of Literature. Indian J Otolaryngol Head Neck Surg. 2020;72(1):86-91",
+    "specialty": "耳科",
+    "diseases": ["外耳道胆脂瘤"]
+  },
+  {
+    "key": "pmc:pmc3577950",
+    "pmcid": "PMC3577950",
+    "pmid": "",
+    "doi": "",
+    "title": "Forastiere AA, et al. Long-term results of RTOG 91-11. J Clin Oncol. 2013",
+    "specialty": "咽喉科",
+    "diseases": ["喉癌"]
+  },
+  {
+    "key": "pmc:pmc5320920",
+    "pmcid": "PMC5320920",
+    "pmid": "",
+    "doi": "",
+    "title": "Forastiere AA, et al. Organ preservation for advanced larynx cancer: issues and outcomes. J Clin Oncol. 2015",
+    "specialty": "咽喉科",
+    "diseases": ["喉癌"]
+  },
+  {
+    "key": "pmc:pmc6265171",
+    "pmcid": "PMC6265171",
+    "pmid": "30538399",
+    "doi": "10.1007/s13193-018-0795-x",
+    "title": "Gaikwad P, et al. Completion total laryngectomy after recurrent laryngeal cancer. PMC6265171",
+    "specialty": "咽喉科",
+    "diseases": ["喉癌"]
+  },
+  {
+    "key": "pmc:pmc3360444",
+    "pmcid": "PMC3360444",
+    "pmid": "22654443",
+    "doi": "10.3748/wjg.v18.i20.2462",
+    "title": "Globus pharyngeus: etiology, diagnosis and treatment",
+    "specialty": "咽喉科",
+    "diseases": ["慢性咽炎"]
+  },
+  {
+    "key": "pmc:pmc6954440",
+    "pmcid": "PMC6954440",
+    "pmid": "",
+    "doi": "",
+    "title": "Goldbrunner R, Weller M, Regis J, et al. EANO guideline on the diagnosis and treatment of vestibular schwannoma. Neuro-Oncology. 2020",
+    "specialty": "耳科",
+    "diseases": ["听神经瘤"]
+  },
+  {
+    "key": "title:hints stroke acute vestibular syndrome",
+    "pmcid": "",
+    "pmid": "",
+    "doi": "",
+    "title": "Kattah JC, Talkad AV, Wang DZ, Hsieh YH, Newman-Toker DE. H.I.N.T.S. to diagnose stroke in the acute vestibular syndrome. Stroke. 2009;40(11):3504-3510",
+    "specialty": "耳科",
+    "diseases": ["前庭神经炎"]
+  },
+  {
+    "key": "title:laryngopharyngeal reflux 2024",
+    "pmcid": "",
+    "pmid": "",
+    "doi": "",
+    "title": "Krause AJ, Yadlapati R. Diagnosis and management of laryngopharyngeal reflux. Aliment Pharmacol Ther. 2024",
+    "specialty": "咽喉科",
+    "diseases": ["慢性咽炎"]
+  },
+  {
+    "key": "doi:10.1542/peds.2013-3791",
+    "pmcid": "",
+    "pmid": "23439909",
+    "doi": "10.1542/peds.2013-3791",
+    "title": "Lieberthal AS, Carroll AE, Chonmaitree T, et al. The Diagnosis and Management of Acute Otitis Media. Pediatrics. 2013;131(3):e964-e999",
+    "specialty": "耳科",
+    "diseases": ["急性中耳炎"]
+  },
+  {
+    "key": "title:acute otitis externa children cfp 2012",
+    "pmcid": "",
+    "pmid": "",
+    "doi": "",
+    "title": "McWilliams CJ, et al. Acute otitis externa in children. Can Fam Physician. 2012",
+    "specialty": "耳科",
+    "diseases": ["急性外耳道炎"]
+  },
+  {
+    "key": "title:ers chronic cough guideline",
+    "pmcid": "",
+    "pmid": "",
+    "doi": "",
+    "title": "Morice AH, Millqvist E, Bieksiene K, et al. ERS guidelines on chronic cough. Eur Respir J. 2020",
+    "specialty": "咽喉科",
+    "diseases": ["慢性咽炎"]
+  },
+  {
+    "key": "pmc:pmc5550312",
+    "pmcid": "PMC5550312",
+    "pmid": "28798546",
+    "doi": "10.1055/s-0037-1603957",
+    "title": "Otologic and Audiology Concerns of Microtia Repair",
+    "specialty": "耳科",
+    "diseases": ["小耳畸形及耳廓发育异常"]
+  },
+  {
+    "key": "pmc:pmc11455860",
+    "pmcid": "PMC11455860",
+    "pmid": "39376298",
+    "doi": "10.1007/s12070-024-04852-z",
+    "title": "Topical Antibiotic-Induced Otomycosis - a Systematic Review of Aetiology and Risk Factors",
+    "specialty": "耳科",
+    "diseases": ["外耳道真菌病"]
+  },
+  {
+    "key": "pmc:pmc7154615",
+    "pmcid": "PMC7154615",
+    "pmid": "",
+    "doi": "10.1016/j.otoeng.2015.05.003",
+    "title": "Recommendations for Management of Acute Pharyngitis in Adults",
+    "specialty": "咽喉科",
+    "diseases": ["急性咽炎"]
+  },
+  {
+    "key": "pmc:pmc6486127",
+    "pmcid": "PMC6486127",
+    "pmid": "26002823",
+    "doi": "10.1002/14651858.cd004783.pub5",
+    "title": "Antibiotics for acute laryngitis in adults",
+    "specialty": "咽喉科",
+    "diseases": ["急性喉炎"]
+  },
+  {
+    "key": "pmc:pmc4466798",
+    "pmcid": "PMC4466798",
+    "pmid": "",
+    "doi": "",
+    "title": "Schaefer P, Baugh RF. Otitis externa. BMJ Clin Evid. 2015",
+    "specialty": "耳科",
+    "diseases": ["急性外耳道炎"]
+  },
+  {
+    "key": "title:otitis media with effusion children 2018",
+    "pmcid": "",
+    "pmid": "",
+    "doi": "",
+    "title": "Simon F, et al. Otitis media with effusion in children: pathophysiology, diagnosis, and treatment. Eur Ann Otorhinolaryngol Head Neck Dis. 2018",
+    "specialty": "耳科",
+    "diseases": ["分泌性中耳炎"]
+  },
+  {
+    "key": "pmc:pmc6081282",
+    "pmcid": "PMC6081282",
+    "pmid": "30069837",
+    "doi": "10.1007/s12105-018-0908-4",
+    "title": "Squamous Cell Carcinoma of the External Auditory Canal and Temporal Bone: An Update",
+    "specialty": "耳科",
+    "diseases": ["外耳道恶性肿瘤"]
+  },
+  {
+    "key": "title:pharyngitis approach diagnosis treatment 2020",
+    "pmcid": "",
+    "pmid": "",
+    "doi": "",
+    "title": "Sykes EA, Wu V, Beyea MM, Simpson MTW, Beyea JA. Pharyngitis: Approach to diagnosis and treatment. Can Fam Physician. 2020",
+    "specialty": "咽喉科",
+    "diseases": ["急性咽炎；急性扁桃体炎"]
+  },
+  {
+    "key": "pmc:pmc8314660",
+    "pmcid": "PMC8314660",
+    "pmid": "33704050",
+    "doi": "10.5664/jcsm.9240",
+    "title": "Use of PSG and HSAT for longitudinal management of OSA",
+    "specialty": "咽喉科",
+    "diseases": ["阻塞性睡眠呼吸暂停低通气综合征"]
+  },
+  {
+    "key": "pmc:pmc3618744",
+    "pmcid": "PMC3618744",
+    "pmid": "23486343",
+    "doi": "10.1136/bcr-2012-008149",
+    "title": "Rare but numerous serious complications of acute otitis media in a 3-year-old child",
+    "specialty": "耳科",
+    "diseases": ["急性中耳炎"]
+  },
+  {
+    "key": "pmc:pmc3312594",
+    "pmcid": "PMC3312594",
+    "pmid": "22451804",
+    "doi": "10.1055/s-0030-1261257",
+    "title": "Vestibular Schwannoma in Patients with Sudden Sensorineural Hearing Loss",
+    "specialty": "耳科",
+    "diseases": ["听神经瘤"]
+  },
+  {
+    "key": "pmc:pmc8134171",
+    "pmcid": "PMC8134171",
+    "pmid": "17569973",
+    "doi": "10.3174/ajnr.a0495",
+    "title": "When Is the Vestibular Aqueduct Enlarged?",
+    "specialty": "耳科",
+    "diseases": ["前庭导水管扩大综合征"]
+  }
+]
