@@ -1,0 +1,33 @@
+name: ENT PMC Retry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pmc_retry.py'
+      - '.github/workflows/ent-pmc-retry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf
+      - name: Download official PMC open-access PDFs
+        run: python pmc_retry.py
+      - name: Commit result archives
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results_pmc
+          git commit -m "Add ENT PMC retry results [skip ci]" || exit 0
+          git push
