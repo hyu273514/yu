@@ -1,0 +1,163 @@
+name: ENT Publisher PDF Salvage
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'publisher_salvage.trigger'
+      - '.github/workflows/ent-publisher-salvage.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  salvage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf
+      - name: Retrieve publisher and journal PDFs
+        run: |
+          python - <<'PY'
+          import csv, hashlib, html, io, json, pathlib, re, time, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from difflib import SequenceMatcher
+          import requests
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+
+          pmcids=['PMC4221774','PMC6374094','PMC5337595','PMC6374080','PMC2699173','PMC6956409','PMC3975551','PMC10128256','PMC7040130','PMC3577950','PMC5320920','PMC6265171','PMC3360444','PMC6954440','PMC3498014','PMC5550312','PMC11455860','PMC7154615','PMC6486127','PMC4466798','PMC2943809','PMC6081282','PMC7145142','PMC8314660','PMC3618744','PMC3312594']
+          nums=[re.sub(r'\D','',x) for x in pmcids]
+          out=pathlib.Path('publisher_salvage_results');pdfroot=out/'pdf';pdfroot.mkdir(parents=True)
+          master=requests.Session();master.headers.update({'User-Agent':'ENT-Publisher-Salvage/1.0 contact@example.com'})
+          for attempt in range(6):
+              rr=master.post('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi',data={'db':'pmc','id':','.join(nums),'retmode':'xml'},timeout=(20,180))
+              if rr.status_code!=429:rr.raise_for_status();break
+              time.sleep(4+attempt*4)
+          soup=BeautifulSoup(rr.content,'xml');records=[]
+          for a in soup.find_all('article'):
+              p=a.find('article-id',attrs={'pub-id-type':'pmcid'})
+              if not p or p.get_text(strip=True).upper() not in pmcids:continue
+              def txt(tag,attrs=None):
+                  n=a.find(tag,attrs=attrs);return n.get_text(' ',strip=True) if n else ''
+              pubdate=a.find('pub-date');year=pubdate.find('year').get_text(strip=True) if pubdate and pubdate.find('year') else ''
+              records.append({'id':p.get_text(strip=True).upper(),'pmcid':p.get_text(strip=True).upper(),'title':txt('article-title'),'doi':txt('article-id',{'pub-id-type':'doi'}),'pmid':txt('article-id',{'pub-id-type':'pmid'}),'journal':txt('journal-title'),'year':year,'volume':txt('volume'),'issue':txt('issue'),'fpage':txt('fpage'),'publisher_id':txt('article-id',{'pub-id-type':'publisher-id'})})
+          records += [
+              {'id':'AOM_2013','pmcid':'','pmid':'23439909','doi':'10.1542/peds.2013-3791','title':'The Diagnosis and Management of Acute Otitis Media','journal':'Pediatrics','year':'2013','volume':'131','issue':'3','fpage':'e964','publisher_id':'peds.2013-3791'},
+              {'id':'MITO_12S_2012','pmcid':'','pmid':'','doi':'10.3969/j.issn.1674-9081.2012.02.012','title':'药物性耳聋相关线粒体 12S rRNA 突变','journal':'协和医学杂志','year':'2012','volume':'3','issue':'2','fpage':'','publisher_id':''}
+          ]
+
+          def norm(x):
+              x=html.unescape(x or '').lower();x=re.sub(r'https?://\S+',' ',x);x=re.sub(r'[^\w\u4e00-\u9fff]+',' ',x);return ' '.join(x.split())
+          def similarity(a,b):
+              a,b=norm(a),norm(b)
+              if not a or not b:return 0
+              if a in b or b in a:return 1
+              return SequenceMatcher(None,a,b).ratio()
+          def valid_pdf(data,title, trusted=False):
+              if not data.lstrip().startswith(b'%PDF-'):return None
+              try:
+                  reader=PdfReader(io.BytesIO(data),strict=False);pages=len(reader.pages)
+                  if pages<1:return None
+                  text='\n'.join((p.extract_text() or '') for p in reader.pages[:3])
+                  metadata=''
+                  try:metadata=str((reader.metadata or {}).get('/Title','') or '')
+                  except:pass
+                  score=max(similarity(title,text[:25000]),similarity(title,metadata))
+                  if not trusted and score<0.22:return None
+                  return pages,metadata,score
+              except:return None
+          def safe(x):return re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',x or '')[:175]
+          def add(lst,url,label,trusted=False):
+              if url and url.startswith('http') and all(x[0]!=url for x in lst):lst.append((url,label,trusted))
+          def candidates(r):
+              c=[];doi=(r.get('doi') or '').strip();j=r.get('journal','').lower();v=r.get('volume','');i=r.get('issue','');p=r.get('fpage','');year=r.get('year','');pub=r.get('publisher_id','')
+              if doi:
+                  add(c,'https://doi.org/'+doi,'doi_landing')
+                  if doi.startswith('10.5664/'):
+                      add(c,'https://jcsm.aasm.org/doi/pdf/'+doi,'AASM_pdf',True);add(c,'https://jcsm.aasm.org/doi/epdf/'+doi,'AASM_epdf',True)
+                  if doi.startswith('10.1007/'):
+                      add(c,'https://link.springer.com/content/pdf/'+doi+'.pdf','Springer_pdf',True)
+                  if doi.startswith('10.1055/'):
+                      add(c,'https://www.thieme-connect.de/products/ejournals/pdf/'+doi+'.pdf','Thieme_pdf',True)
+                  if doi.startswith('10.1136/'):
+                      add(c,f'https://casereports.bmj.com/content/{year}/{pub}.full.pdf','BMJ_case_pdf',True);add(c,'https://casereports.bmj.com/content/'+pub+'.full.pdf','BMJ_case_pdf2',True)
+                  if doi.startswith('10.1200/'):
+                      add(c,'https://ascopubs.org/doi/pdf/'+doi,'JCO_pdf',True);add(c,'https://ascopubs.org/doi/epdf/'+doi,'JCO_epdf',True)
+                  if doi.startswith('10.1002/14651858'):
+                      add(c,'https://www.cochranelibrary.com/cdsr/doi/'+doi+'/pdf/full','Cochrane_pdf',True);add(c,'https://www.cochranelibrary.com/cdsr/doi/'+doi+'/epdf/full','Cochrane_epdf',True)
+                  if doi.startswith('10.1093/'):
+                      add(c,'https://academic.oup.com/doi/pdf/'+doi,'OUP_generic_pdf',True)
+                  if doi.startswith('10.3748/'):
+                      add(c,f'https://www.wjgnet.com/1007-9327/full/v{v}/i{i}/{p}.pdf','WJG_pdf',True);add(c,f'https://www.wjgnet.com/1007-9327/PDF/v{v}/i{i}/{p}.pdf','WJG_pdf2',True)
+                  if doi.startswith('10.3174/'):
+                      add(c,f'https://www.ajnr.org/content/ajnr/{v}/{i}/{p}.full.pdf','AJNR_pdf',True);add(c,f'https://www.ajnr.org/content/{v}/{i}/{p}.full.pdf','AJNR_pdf2',True)
+                  if doi.startswith('10.1542/'):
+                      add(c,'https://publications.aap.org/pediatrics/article-pdf/131/3/e964/1092891/peds_2013-3791.pdf','AAP_pdf_guess',True)
+                  if doi.startswith('10.3969/'):
+                      add(c,'https://xhyxzz.pumch.cn/cn/article/pdf/preview/'+doi+'.pdf','PUMCH_pdf',True);add(c,'https://xhyxzz.pumch.cn/cn/article/pdf/preview/'+doi,'PUMCH_pdf2',True)
+                  if doi.startswith('10.13201/'):
+                      add(c,'https://lceh.whuhzzs.com/data/article/lceh/preview/pdf/lceh-36-5-372.pdf','LCEH_pdf',True)
+              if 'canadian family physician' in j:
+                  add(c,f'https://www.cfp.ca/content/cfp/{v}/{i}/{p}.full.pdf','CFP_pdf',True);add(c,f'https://www.cfp.ca/content/{v}/{i}/{p}.full.pdf','CFP_pdf2',True)
+              if 'journal of clinical sleep medicine' in j and not doi and v=='5' and i=='3' and p=='263':
+                  add(c,'https://jcsm.aasm.org/doi/pdf/10.5664/jcsm.27497','AASM_old_guess',True)
+              if r['id']=='PMC4221774':
+                  for n in range(1225,1241):add(c,f'https://amj.net.au/index.php/AMJ/article/download/2094/{n}','AMJ_download',True)
+              if r['id']=='PMC7154615':
+                  add(c,'https://www.elsevier.es/en-revista-acta-otorrinolaringologica-espanola-english-edition--497-pdf-S217357351500034X','Elsevier_ES_pdf',True)
+              return c
+          def html_pdf_links(base,data):
+              soup=BeautifulSoup(data,'html.parser');links=[]
+              for m in soup.find_all('meta'):
+                  name=((m.get('name') or m.get('property') or '').lower());val=m.get('content')
+                  if val and ('pdf' in name or name in {'citation_pdf_url','wkhealth_pdf_url'}):links.append((urllib.parse.urljoin(base,val),'citation_pdf',True))
+              for a in soup.find_all('a',href=True):
+                  u=urllib.parse.urljoin(base,a['href']);text=a.get_text(' ',strip=True).lower()
+                  if '.pdf' in u.lower() or '/pdf/' in u.lower() or 'download pdf' in text:links.append((u,'html_pdf_link',False))
+              return links[:15]
+          def process(r):
+              sess=requests.Session();sess.headers.update({'User-Agent':'Mozilla/5.0 ENT-Publisher-Salvage/1.0','Accept':'text/html,application/pdf,*/*;q=0.5'})
+              errors=[];seen=set();queue=candidates(r)
+              while queue and len(seen)<45:
+                  url,label,trusted=queue.pop(0)
+                  if url in seen:continue
+                  seen.add(url)
+                  try:
+                      z=sess.get(url,timeout=(10,35),allow_redirects=True);data=z.content
+                      info=valid_pdf(data,r['title'],trusted)
+                      if info:
+                          path=pdfroot/(safe(f"{r['year']}_{r['title']}_{r['id']}_publisher")+'.pdf');path.write_bytes(data)
+                          return {**r,'status':'success','method':label,'source_url':z.url,'path':str(path),'pages':info[0],'size_bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'pdf_metadata_title':info[1],'match_score':round(info[2],3),'error':''}
+                      ctype=(z.headers.get('content-type') or '').lower()
+                      if ('html' in ctype or data.lstrip().startswith((b'<!DOCTYPE',b'<html',b'<?xml'))) and len(seen)<35:
+                          queue.extend(x for x in html_pdf_links(z.url,data) if x[0] not in seen)
+                      errors.append(f'{z.status_code}:{ctype}:{label}:{z.url}')
+                  except Exception as e:errors.append(f'{type(e).__name__}:{label}:{url}')
+              return {**r,'status':'failed','method':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','pdf_metadata_title':'','match_score':'','error':' | '.join(errors[-18:])[:5000]}
+          results=[]
+          with ThreadPoolExecutor(max_workers=6) as ex:
+              futs={ex.submit(process,r):r['id'] for r in records}
+              for n,f in enumerate(as_completed(futs),1):
+                  x=f.result();results.append(x);print(f'[{n}/{len(records)}] {x["status"]} {x["id"]} {x.get("pages","")} {x.get("method","")}',flush=True)
+          results.sort(key=lambda x:x['id']);fields=[]
+          for r in results:
+              for k in r:
+                  if k not in fields:fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          sm={'total':len(results),'success':sum(x['status']=='success' for x in results),'failed':sum(x['status']!='success' for x in results),'pages':sum(int(x.get('pages') or 0) for x in results),'bytes':sum(int(x.get('size_bytes') or 0) for x in results)}
+          (out/'summary.json').write_text(json.dumps(sm,ensure_ascii=False,indent=2),encoding='utf-8');print(sm)
+          PY
+      - name: Upload publisher salvage results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-publisher-salvage-results
+          path: publisher_salvage_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
