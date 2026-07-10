@@ -1,0 +1,118 @@
+name: ENT OA HTML Fulltext Archive
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'oa_html_queue.json'
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf urllib3
+      - name: Archive validated open full-text pages
+        run: |
+          python - <<'PY'
+          import csv, hashlib, json, pathlib, re, shutil, subprocess, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          import requests, urllib3
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+          rows=json.load(open('oa_html_queue.json',encoding='utf-8'))
+          out=pathlib.Path('oa_html_results');pdfroot=out/'pdf';domroot=out/'dom';pdfroot.mkdir(parents=True,exist_ok=True);domroot.mkdir(parents=True,exist_ok=True)
+          chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable') or shutil.which('chromium')
+          if not chrome:raise SystemExit('Chrome unavailable')
+          email='alice246991@gmail.com';ua='ENT-Literature-Archive/1.0 (mailto:alice246991@gmail.com)'
+          def safe(x,n=150):
+              x=re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',str(x or ''));return re.sub(r'\s+','_',x).strip('._ ')[:n] or 'untitled'
+          stop={'with','from','that','this','into','after','using','study','review','clinical','patients','guideline','pmcid','article','journal','results','conclusion'}
+          def toks(x):return {w for w in re.findall(r'[a-z0-9]+',str(x).lower()) if len(w)>3 and w not in stop}
+          def title_score(title,text):return len(toks(title)&toks(text))/max(1,len(toks(title)))
+          def add(cands,method,url,license='',oa_status=''):
+              if url and isinstance(url,str) and url.startswith('http'):cands.append({'method':method,'url':url,'license':license or '','oa_status':oa_status or ''})
+          def candidates(row):
+              doi=row.get('doi','');pmid=row.get('pmid','');pmcid=row.get('pmcid','');ans=[];s=requests.Session();s.headers['User-Agent']=ua
+              if doi:
+                  try:
+                      j=s.get('https://api.unpaywall.org/v2/'+urllib.parse.quote(doi,safe='')+'?email='+email,timeout=25).json();status=j.get('oa_status','')
+                      for loc in [j.get('best_oa_location'),j.get('first_oa_location')]+(j.get('oa_locations') or []):
+                          if loc and (j.get('is_oa') or status in {'gold','hybrid','green'}):add(ans,'unpaywall',loc.get('url') or loc.get('landing_page_url') or loc.get('url_for_landing_page'),loc.get('license'),status)
+                  except Exception:pass
+                  add(ans,'doi','https://doi.org/'+doi,'','')
+              for ident in ([f'https://doi.org/{doi}'] if doi else [])+([f'https://pubmed.ncbi.nlm.nih.gov/{pmid}'] if pmid else []):
+                  try:
+                      j=s.get('https://api.openalex.org/works/'+urllib.parse.quote(ident,safe='')+'?mailto='+email,timeout=25).json();oa=j.get('open_access') or {}
+                      if oa.get('is_oa'):
+                          for loc in [j.get('best_oa_location'),j.get('primary_location')]+(j.get('locations') or []):
+                              if loc:add(ans,'openalex',loc.get('landing_page_url'),loc.get('license'),oa.get('oa_status'))
+                      break
+                  except Exception:pass
+              if pmcid:add(ans,'pmc','https://pmc.ncbi.nlm.nih.gov/articles/'+pmcid+'','','pmc')
+              ded=[];seen=set()
+              for x in ans:
+                  if x['url'] not in seen:seen.add(x['url']);ded.append(x)
+              return ded
+          reject_phrases=['recaptcha','verify you are human','access denied','enable javascript and cookies','purchase access','institutional access','sign in to access','log in to access','this challenge page','cloudflare ray id']
+          section_terms=['abstract','introduction','methods','materials and methods','case presentation','case report','results','discussion','references','conclusion']
+          def dump_dom(url,stem):
+              p=domroot/(stem+'.html');cmd=[chrome,'--headless=new','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--ignore-certificate-errors','--virtual-time-budget=12000','--dump-dom',url];cp=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90,check=False);p.write_bytes(cp.stdout);return p
+          def validate_dom(path,title):
+              raw=path.read_text(encoding='utf-8',errors='ignore');soup=BeautifulSoup(raw,'html.parser')
+              for tag in soup(['script','style','nav','footer','header','aside','form']):tag.decompose()
+              text=re.sub(r'\s+',' ',soup.get_text(' ',strip=True));low=text.lower();score=title_score(title,text);sections=sum(term in low for term in section_terms)
+              if any(p in low for p in reject_phrases):return None,f'rejected_page score={score:.2f} chars={len(text)} sections={sections}'
+              if len(text)<5000:return None,f'too_short score={score:.2f} chars={len(text)} sections={sections}'
+              if score<0.25:return None,f'title_mismatch score={score:.2f} chars={len(text)} sections={sections}'
+              if sections<3:return None,f'insufficient_structure score={score:.2f} chars={len(text)} sections={sections}'
+              return {'score':score,'chars':len(text),'sections':sections},''
+          def render(url,pdf):
+              cmd=[chrome,'--headless=new','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--ignore-certificate-errors','--virtual-time-budget=15000','--no-pdf-header-footer',f'--print-to-pdf={pdf.resolve()}',url];subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=110,check=False)
+              if not pdf.exists() or not pdf.read_bytes().lstrip().startswith(b'%PDF-'):return None,'not_pdf'
+              try:
+                  r=PdfReader(pdf,strict=False);pages=len(r.pages);text=' '.join((p.extract_text() or '') for p in r.pages[:min(8,pages)])
+                  if pages<3 or len(text)<2500:return None,f'weak_pdf pages={pages} text={len(text)}'
+                  return {'pages':pages,'bytes':pdf.stat().st_size,'sha256':hashlib.sha256(pdf.read_bytes()).hexdigest()},''
+              except Exception as e:return None,'pdf_error:'+repr(e)[:140]
+          def one(row):
+              title=row.get('title','');errors=[];ans={**row,'status':'failed','version':'','method':'','license':'','oa_status':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','title_score':'','text_chars':'','sections':'','error':''}
+              for j,c in enumerate(candidates(row),1):
+                  stem=safe(row.get('pmcid') or row.get('doi') or row.get('key') or title,80)+'_'+str(j)
+                  try:
+                      dom=dump_dom(c['url'],stem);valid,err=validate_dom(dom,title)
+                      if not valid:errors.append(f"{c['method']}:{err}:{c['url']}");continue
+                      pdf=pdfroot/(safe(row.get('pmcid') or row.get('doi') or row.get('key'),55)+'_'+safe(title)+'_开放网页全文归档.pdf');info,perr=render(c['url'],pdf)
+                      if not info:errors.append(f"{c['method']}:{perr}:{c['url']}");continue
+                      ans.update(status='success',version='开放网页全文归档PDF',method=c['method'],license=c['license'],oa_status=c['oa_status'],source_url=c['url'],path=str(pdf),pages=info['pages'],size_bytes=info['bytes'],sha256=info['sha256'],title_score=round(valid['score'],3),text_chars=valid['chars'],sections=valid['sections'],error='');return ans
+                  except Exception as e:errors.append(f"{c['method']}:{type(e).__name__}:{str(e)[:150]}:{c['url']}")
+              ans['error']=' | '.join(errors)[:15000];return ans
+          results=[]
+          with ThreadPoolExecutor(max_workers=3) as ex:
+              futs={ex.submit(one,r):r.get('pmcid') or r.get('doi') or r.get('title') for r in rows}
+              for i,f in enumerate(as_completed(futs),1):x=f.result();results.append(x);print(f'[{i}/{len(rows)}] {x["status"]} {futs[f]} {x.get("pages","")}',flush=True)
+          results.sort(key=lambda x:(x.get('specialty',''),x.get('disease',''),x.get('title','')));fields=[]
+          for r in results:
+              for k in r:
+                  if k not in fields:fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          summary={'total':len(results),'success':sum(r['status']=='success' for r in results),'failed':sum(r['status']!='success' for r in results),'pages':sum(int(r.get('pages') or 0) for r in results),'bytes':sum(int(r.get('size_bytes') or 0) for r in results)}
+          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          PY
+      - name: Upload OA HTML archive results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-oa-html-results
+          path: oa_html_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
