@@ -1,0 +1,74 @@
+name: ENT Fast PDF Salvage
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deep_retry.b64.part*'
+      - '.github/workflows/ent-fast-pdf.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  salvage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf
+      - name: Rebuild downloader
+        run: cat deep_retry.b64.part0[0-6] | base64 --decode > deep_retry.py
+      - name: Validate downloader
+        run: python -m py_compile deep_retry.py
+      - name: Run fast OA PDF salvage
+        run: |
+          python - <<'PY'
+          import deep_retry
+
+          deep_retry.metadata_crossref = lambda s, row: {}
+          deep_retry.metadata_semantic = lambda s, row: {}
+          deep_retry.render_jats = lambda s, row, titles, errors: None
+
+          original_get = deep_retry.get
+          def fast_get(s, url, *, timeout=(10, 22), stream=False, max_tries=1):
+              return original_get(s, url, timeout=timeout, stream=stream, max_tries=1)
+          deep_retry.get = fast_get
+
+          def fast_candidates(row, ep, cr, oa, ss, s):
+              cands = {}
+              deep_retry.add_candidate(cands, row.get('url'), 'direct_url', trusted=(row.get('url','').lower().endswith('.pdf')))
+              for item in ((ep.get('fullTextUrlList') or {}).get('fullTextUrl') or []):
+                  url = item.get('url')
+                  style = (item.get('documentStyle') or '').lower()
+                  if style == 'pdf' or '.pdf' in (url or '').lower() or 'pdf=' in (url or '').lower():
+                      deep_retry.add_candidate(cands, url, 'europepmc_core', trusted=True)
+              for loc in [oa.get('best_oa_location') or {}, oa.get('primary_location') or {}] + (oa.get('locations') or []):
+                  deep_retry.add_candidate(cands, loc.get('pdf_url'), 'openalex_pdf', trusted=True)
+              doi = row.get('doi') or ''
+              up = deep_retry.metadata_unpaywall(s, doi)
+              for loc in [up.get('best_oa_location') or {}] + (up.get('oa_locations') or []):
+                  deep_retry.add_candidate(cands, loc.get('url_for_pdf'), 'unpaywall_pdf', trusted=True)
+              pmcid = row.get('pmcid') or ''
+              if pmcid:
+                  deep_retry.add_candidate(cands, f'https://europepmc.org/articles/{pmcid}?pdf=render', 'europepmc_render', trusted=True)
+                  deep_retry.add_candidate(cands, f'https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf', 'europepmc_backend_pdf', trusted=True)
+                  deep_retry.add_candidate(cands, f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/', 'pmc_pdf_directory')
+              return sorted(cands.values(), key=lambda x: deep_retry.candidate_score(x['url'], x['source'], doi, pmcid), reverse=True)
+
+          deep_retry.build_candidates = fast_candidates
+          deep_retry.main()
+          PY
+          mv deep_results fast_pdf_results
+      - name: Upload fast PDF results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-fast-pdf-results
+          path: fast_pdf_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
