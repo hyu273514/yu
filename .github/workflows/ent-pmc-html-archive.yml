@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'pmc_html_queue.b64'
+      - 'pmc_html.trigger'
       - '.github/workflows/ent-pmc-html-archive.yml'
 
 permissions:
@@ -21,91 +21,153 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml pypdf
-      - name: Decode queue
-        run: base64 --decode pmc_html_queue.b64 > pmc_html_queue.json
       - name: Archive official PMC full text as PDF
         run: |
           python - <<'PY'
-          import csv, hashlib, html, io, json, pathlib, re, shutil, subprocess, time
+          import csv, hashlib, html, json, pathlib, re, shutil, subprocess
           from concurrent.futures import ThreadPoolExecutor, as_completed
           import requests
           from bs4 import BeautifulSoup
           from pypdf import PdfReader
 
-          rows=json.load(open('pmc_html_queue.json',encoding='utf-8'))
-          out=pathlib.Path('pmc_html_results'); pdfroot=out/'pdf'; htmlroot=out/'html'; pdfroot.mkdir(parents=True); htmlroot.mkdir(parents=True)
-          chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable') or shutil.which('chromium') or shutil.which('chromium-browser')
-          if not chrome: raise SystemExit('Chrome/Chromium not found')
-          headers={'User-Agent':'Mozilla/5.0 ENT-PMC-Archive/1.0'}
+          pmcids = [
+              'PMC4221774','PMC10105630','PMC6374094','PMC5337595','PMC6374080',
+              'PMC2699173','PMC6956409','PMC3975551','PMC10128256','PMC7335535',
+              'PMC7040130','PMC6942543','PMC2846828','PMC3577950','PMC5320920',
+              'PMC6265171','PMC3360444','PMC6954440','PMC3183377','PMC7108032',
+              'PMC4593511','PMC10997336','PMC3498014','PMC5550312','PMC11455860',
+              'PMC7154615','PMC6486127','PMC4466798','PMC10231305','PMC2943809',
+              'PMC6081282','PMC7145142','PMC8314660','PMC3618744','PMC3312594',
+              'PMC8134171'
+          ]
+          rows = [{'pmcid': p, 'specialties': 'PMC开放全文', 'diseases': '待归档', 'title': p, 'doi': ''} for p in pmcids]
+          out = pathlib.Path('pmc_html_results')
+          pdfroot = out / 'pdf'
+          htmlroot = out / 'html'
+          pdfroot.mkdir(parents=True)
+          htmlroot.mkdir(parents=True)
+          chrome = shutil.which('google-chrome') or shutil.which('google-chrome-stable') or shutil.which('chromium') or shutil.which('chromium-browser')
+          if not chrome:
+              raise SystemExit('Chrome/Chromium not found')
+          headers = {'User-Agent': 'Mozilla/5.0 ENT-PMC-Archive/1.0'}
 
-          def safe(s,n=150):
-              s=re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',s or '')
-              return re.sub(r'\s+','_',s).strip('._ ')[:n] or 'untitled'
-          def pdf_info(p):
+          def safe(value, limit=150):
+              value = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', '_', value or '')
+              return re.sub(r'\s+', '_', value).strip('._ ')[:limit] or 'untitled'
+
+          def pdf_info(path):
               try:
-                  data=p.read_bytes()
-                  if not data.lstrip().startswith(b'%PDF-'): return None
-                  r=PdfReader(p,strict=False)
-                  return len(r.pages),len(data),hashlib.sha256(data).hexdigest()
-              except Exception:return None
-          def render_local(xml,row,htmlpath):
-              soup=BeautifulSoup(xml,'xml')
-              at=soup.find('article-title'); title=at.get_text(' ',strip=True) if at else row['title']
-              body=soup.find('body'); parts=[]
+                  data = path.read_bytes()
+                  if not data.lstrip().startswith(b'%PDF-'):
+                      return None
+                  reader = PdfReader(path, strict=False)
+                  return len(reader.pages), len(data), hashlib.sha256(data).hexdigest()
+              except Exception:
+                  return None
+
+          def render_local(xml_bytes, row, html_path):
+              soup = BeautifulSoup(xml_bytes, 'xml')
+              article_title = soup.find('article-title')
+              title = article_title.get_text(' ', strip=True) if article_title else row['title']
+              doi_node = soup.find('article-id', attrs={'pub-id-type': 'doi'})
+              doi = doi_node.get_text(' ', strip=True) if doi_node else ''
+              body = soup.find('body')
+              parts = []
               if body:
-                  for node in body.find_all(['title','p','list-item','caption'],recursive=True):
-                      text=node.get_text(' ',strip=True)
-                      if not text: continue
-                      if node.name=='title':parts.append(f'<h2>{html.escape(text)}</h2>')
-                      elif node.name=='list-item':parts.append(f'<li>{html.escape(text)}</li>')
-                      elif node.name=='caption':parts.append(f'<p class="caption">{html.escape(text)}</p>')
-                      else:parts.append(f'<p>{html.escape(text)}</p>')
-              refs=[]
+                  for node in body.find_all(['title', 'p', 'list-item', 'caption'], recursive=True):
+                      text = node.get_text(' ', strip=True)
+                      if not text:
+                          continue
+                      if node.name == 'title':
+                          parts.append(f'<h2>{html.escape(text)}</h2>')
+                      elif node.name == 'list-item':
+                          parts.append(f'<li>{html.escape(text)}</li>')
+                      elif node.name == 'caption':
+                          parts.append(f'<p class="caption">{html.escape(text)}</p>')
+                      else:
+                          parts.append(f'<p>{html.escape(text)}</p>')
+              refs = []
               for ref in soup.find_all('ref'):
-                  t=ref.get_text(' ',strip=True)
-                  if t:refs.append(f'<li>{html.escape(t)}</li>')
-              source=f'https://www.ebi.ac.uk/europepmc/webservices/rest/{row["pmcid"]}/fullTextXML'
-              doc=f'''<!doctype html><html><head><meta charset="utf-8"><style>@page{{size:A4;margin:16mm}}body{{font-family:Arial,"Noto Sans",sans-serif;line-height:1.45;font-size:10.5pt;color:#111}}h1{{font-size:20pt}}h2{{font-size:14pt;margin-top:1.3em}}p{{text-align:justify}}li{{margin-bottom:4px}}.meta,.source{{color:#555;font-size:9pt}}.caption{{font-style:italic}}</style></head><body><h1>{html.escape(title)}</h1><p class="meta">PMCID: {row['pmcid']} &nbsp; DOI: {html.escape(row.get('doi',''))}</p>{''.join(parts)}<h2>References</h2><ol>{''.join(refs)}</ol><p class="source">Archived from legally accessible Europe PMC JATS full text: {html.escape(source)}</p></body></html>'''
-              htmlpath.write_text(doc,encoding='utf-8')
-              return title,source
-          def chrome_print(target,pdfpath,budget='12000'):
-              cmd=[chrome,'--headless=new','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',f'--virtual-time-budget={budget}',f'--print-to-pdf={pdfpath.resolve()}',target]
-              subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=100,check=False)
-              return pdf_info(pdfpath)
-          def one(row):
-              pmcid=row['pmcid']; spec=safe(row['specialties'],50); disease=safe(row['diseases'],75); folder=pdfroot/spec/disease; folder.mkdir(parents=True,exist_ok=True)
-              stem=safe(f'{pmcid}_{row["title"]}_PMC开放全文归档',170); pdfpath=folder/(stem+'.pdf'); htmlpath=htmlroot/(stem+'.html'); errors=[]
-              try:
-                  u=f'https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML'
-                  r=requests.get(u,headers=headers,timeout=(15,45)); r.raise_for_status()
-                  if b'<article' in r.content[:20000] or b'<article' in r.content:
-                      official_title,source=render_local(r.content,row,htmlpath)
-                      info=chrome_print(htmlpath.resolve().as_uri(),pdfpath,'3000')
-                      if info:
-                          return {**row,'status':'success','version':'EuropePMC_JATS归档PDF','official_title':official_title,'source_url':source,'path':str(pdfpath),'pages':info[0],'size_bytes':info[1],'sha256':info[2],'error':''}
-              except Exception as e:errors.append('JATS '+repr(e)[:180])
-              try:
-                  source=f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/'
-                  info=chrome_print(source,pdfpath,'18000')
-                  if info:
-                      return {**row,'status':'success','version':'PMC官方网页打印PDF','official_title':'','source_url':source,'path':str(pdfpath),'pages':info[0],'size_bytes':info[1],'sha256':info[2],'error':' | '.join(errors)}
-              except Exception as e:errors.append('HTML '+repr(e)[:180])
-              return {**row,'status':'failed','version':'','official_title':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','error':' | '.join(errors)}
+                  text = ref.get_text(' ', strip=True)
+                  if text:
+                      refs.append(f'<li>{html.escape(text)}</li>')
+              source = f'https://www.ebi.ac.uk/europepmc/webservices/rest/{row["pmcid"]}/fullTextXML'
+              document = f'''<!doctype html><html><head><meta charset="utf-8"><style>
+              @page{{size:A4;margin:16mm}} body{{font-family:Arial,"Noto Sans",sans-serif;line-height:1.45;font-size:10.5pt;color:#111}}
+              h1{{font-size:20pt}} h2{{font-size:14pt;margin-top:1.3em}} p{{text-align:justify}} li{{margin-bottom:4px}}
+              .meta,.source{{color:#555;font-size:9pt}} .caption{{font-style:italic}} table{{border-collapse:collapse;width:100%}}
+              td,th{{border:1px solid #999;padding:3px}}
+              </style></head><body><h1>{html.escape(title)}</h1>
+              <p class="meta">PMCID: {row['pmcid']} &nbsp; DOI: {html.escape(doi)}</p>
+              {''.join(parts)}<h2>References</h2><ol>{''.join(refs)}</ol>
+              <p class="source">Archived from legally accessible Europe PMC JATS full text: {html.escape(source)}</p>
+              </body></html>'''
+              html_path.write_text(document, encoding='utf-8')
+              return title, doi, source
 
-          results=[]
-          with ThreadPoolExecutor(max_workers=4) as ex:
-              futs={ex.submit(one,r):r['pmcid'] for r in rows}
-              for i,f in enumerate(as_completed(futs),1):
-                  x=f.result();results.append(x);print(f'[{i}/{len(rows)}] {x["status"]} {x["pmcid"]} {x.get("pages","")}',flush=True)
-          results.sort(key=lambda x:x['pmcid'])
-          fields=[]
-          for r in results:
-              for k in r:
-                  if k not in fields:fields.append(k)
-          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:
-              w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
-          summary={'total':len(results),'success':sum(r['status']=='success' for r in results),'failed':sum(r['status']!='success' for r in results),'jats':sum(r.get('version')=='EuropePMC_JATS归档PDF' for r in results),'html_print':sum(r.get('version')=='PMC官方网页打印PDF' for r in results),'pages':sum(int(r.get('pages') or 0) for r in results)}
-          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          def chrome_print(target, pdf_path, budget='12000'):
+              command = [
+                  chrome, '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+                  f'--virtual-time-budget={budget}', f'--print-to-pdf={pdf_path.resolve()}', target
+              ]
+              subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=100, check=False)
+              return pdf_info(pdf_path)
+
+          def process_one(row):
+              pmcid = row['pmcid']
+              folder = pdfroot / safe(row['specialties'], 50) / safe(row['diseases'], 75)
+              folder.mkdir(parents=True, exist_ok=True)
+              stem = safe(f'{pmcid}_{row["title"]}_PMC开放全文归档', 170)
+              pdf_path = folder / (stem + '.pdf')
+              html_path = htmlroot / (stem + '.html')
+              errors = []
+              try:
+                  xml_url = f'https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML'
+                  response = requests.get(xml_url, headers=headers, timeout=(15, 45))
+                  response.raise_for_status()
+                  if b'<article' in response.content:
+                      official_title, doi, source = render_local(response.content, row, html_path)
+                      info = chrome_print(html_path.resolve().as_uri(), pdf_path, '3000')
+                      if info:
+                          return {**row, 'status': 'success', 'version': 'EuropePMC_JATS归档PDF', 'official_title': official_title, 'doi': doi, 'source_url': source, 'path': str(pdf_path), 'pages': info[0], 'size_bytes': info[1], 'sha256': info[2], 'error': ''}
+              except Exception as exc:
+                  errors.append('JATS ' + repr(exc)[:180])
+              try:
+                  source = f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/'
+                  info = chrome_print(source, pdf_path, '18000')
+                  if info:
+                      return {**row, 'status': 'success', 'version': 'PMC官方网页打印PDF', 'official_title': '', 'source_url': source, 'path': str(pdf_path), 'pages': info[0], 'size_bytes': info[1], 'sha256': info[2], 'error': ' | '.join(errors)}
+              except Exception as exc:
+                  errors.append('HTML ' + repr(exc)[:180])
+              return {**row, 'status': 'failed', 'version': '', 'official_title': '', 'source_url': '', 'path': '', 'pages': '', 'size_bytes': '', 'sha256': '', 'error': ' | '.join(errors)}
+
+          results = []
+          with ThreadPoolExecutor(max_workers=4) as executor:
+              futures = {executor.submit(process_one, row): row['pmcid'] for row in rows}
+              for index, future in enumerate(as_completed(futures), 1):
+                  result = future.result()
+                  results.append(result)
+                  print(f'[{index}/{len(rows)}] {result["status"]} {result["pmcid"]} {result.get("pages", "")}', flush=True)
+          results.sort(key=lambda item: item['pmcid'])
+          fields = []
+          for result in results:
+              for key in result:
+                  if key not in fields:
+                      fields.append(key)
+          with open(out / 'report.csv', 'w', encoding='utf-8-sig', newline='') as file:
+              writer = csv.DictWriter(file, fieldnames=fields)
+              writer.writeheader()
+              writer.writerows(results)
+          summary = {
+              'total': len(results),
+              'success': sum(result['status'] == 'success' for result in results),
+              'failed': sum(result['status'] != 'success' for result in results),
+              'jats': sum(result.get('version') == 'EuropePMC_JATS归档PDF' for result in results),
+              'html_print': sum(result.get('version') == 'PMC官方网页打印PDF' for result in results),
+              'pages': sum(int(result.get('pages') or 0) for result in results)
+          }
+          (out / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+          print(summary)
           PY
       - name: Upload PMC archive results
         uses: actions/upload-artifact@v4
