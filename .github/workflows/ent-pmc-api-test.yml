@@ -1,0 +1,61 @@
+name: ENT PMC API Test
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pmc_api.trigger'
+      - '.github/workflows/ent-pmc-api-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install requests
+        run: pip install requests
+      - name: Probe official NCBI full-text APIs
+        run: |
+          python - <<'PY'
+          import json, pathlib, re, requests
+          ids=['PMC2699173','PMC4221774','PMC10105630']
+          templates={
+            'efetch_xml':'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={num}&retmode=xml',
+            'oai_pmc':'https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi?verb=GetRecord&identifier=oai:pubmedcentral.nih.gov:{num}&metadataPrefix=pmc',
+            'bioc_json':'https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_json/{pmcid}/unicode',
+            'bioc_xml':'https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_xml/{pmcid}/unicode',
+            'oa_fcgi':'https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}',
+            'epmc_xml':'https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML'
+          }
+          session=requests.Session();session.headers['User-Agent']='ENT-PMC-API-Test/1.0 contact@example.com'
+          out=pathlib.Path('pmc_api_test');out.mkdir()
+          report=[]
+          for pmcid in ids:
+            num=re.sub(r'\D','',pmcid)
+            for name,tpl in templates.items():
+              url=tpl.format(pmcid=pmcid,num=num)
+              try:
+                r=session.get(url,timeout=(15,60),allow_redirects=True)
+                data=r.content
+                sample=data[:500].decode('utf-8','replace')
+                rec={'pmcid':pmcid,'endpoint':name,'url':url,'final_url':r.url,'status':r.status_code,'content_type':r.headers.get('content-type',''),'bytes':len(data),'has_article':b'<article' in data,'has_body':b'<body' in data,'has_passages':b'passages' in data,'sample':sample}
+                report.append(rec)
+                (out/f'{pmcid}_{name}.bin').write_bytes(data)
+              except Exception as e:
+                report.append({'pmcid':pmcid,'endpoint':name,'url':url,'status':'error','error':repr(e)})
+          (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+          for x in report: print(x)
+          PY
+      - name: Upload API test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pmc-api-test-results
+          path: pmc_api_test
+          retention-days: 3
