@@ -1,0 +1,43 @@
+name: ENT JATS Fast Archive
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'jats_fast.trigger'
+      - 'deep_retry.b64.part*'
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf
+      - name: Rebuild downloader
+        run: cat deep_retry.b64.part* | base64 --decode > deep_retry.py
+      - name: Validate downloader
+        run: python -m py_compile deep_retry.py
+      - name: Render Europe PMC JATS full text
+        run: |
+          python - <<'PY'
+          import deep_retry
+          deep_retry.build_candidates = lambda row, ep, cr, oa, ss, s: []
+          deep_retry.main()
+          PY
+          mv deep_results jats_results
+      - name: Upload JATS results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-jats-fast-results
+          path: jats_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
