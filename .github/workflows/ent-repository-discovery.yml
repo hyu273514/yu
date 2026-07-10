@@ -1,0 +1,132 @@
+name: ENT Repository Discovery
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'repo_discovery_queue.json'
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 pypdf urllib3
+      - name: Discover open repository PDFs
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, time, urllib.parse
+          import requests, urllib3
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+          rows=json.load(open('repo_discovery_queue.json',encoding='utf-8'))
+          out=pathlib.Path('repository_results'); pdfroot=out/'pdf'; pdfroot.mkdir(parents=True,exist_ok=True)
+          s=requests.Session(); s.headers.update({'User-Agent':'ENT-Literature-Archive/1.0 (mailto:alice246991@gmail.com)'})
+          email='alice246991@gmail.com'
+          def safe(x,n=150):
+              x=re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',str(x or ''));return re.sub(r'\s+','_',x).strip('._ ')[:n] or 'untitled'
+          def tok(x):return {w for w in re.findall(r'[a-z0-9]+',str(x).lower()) if len(w)>3 and w not in {'with','from','that','this','into','after','using','study','review','clinical','patients','guideline'}}
+          def validate(data,title):
+              if not data.lstrip().startswith(b'%PDF-'):return None,'not_pdf'
+              try:
+                  r=PdfReader(io.BytesIO(data),strict=False);pages=len(r.pages);txt=' '.join((r.pages[i].extract_text() or '') for i in range(min(pages,3)))
+                  score=len(tok(title)&tok(txt))/max(1,len(tok(title)))
+                  if txt and score<0.22:return None,f'mismatch:{score:.2f}'
+                  return (pages,len(data),hashlib.sha256(data).hexdigest(),score),''
+              except Exception as e:return None,'pdf_error:'+repr(e)[:120]
+          def add(cands,method,url):
+              if url and isinstance(url,str) and url.startswith('http'):cands.append((method,url))
+          def landing_links(resp):
+              ans=[]
+              try:
+                  soup=BeautifulSoup(resp.text,'html.parser')
+                  for m in soup.select('meta[name="citation_pdf_url"],meta[name="wkhealth_pdf_url"],meta[property="og:pdf"]'):
+                      add(ans,'landing_meta',urllib.parse.urljoin(resp.url,m.get('content','').strip()))
+                  for a in soup.find_all('a',href=True):
+                      h=a['href'].strip()
+                      if '.pdf' in h.lower() or '/pdf/' in h.lower() or '/epdf/' in h.lower():add(ans,'landing_link',urllib.parse.urljoin(resp.url,h))
+              except Exception:pass
+              return ans[:25]
+          results=[]
+          for idx,row in enumerate(rows,1):
+              title=row.get('title','');doi=row.get('doi','');pmid=row.get('pmid','');pmcid=row.get('pmcid','');cands=[];errors=[]
+              # Semantic Scholar
+              for ident in ([f'DOI:{doi}'] if doi else [])+([f'PMID:{pmid}'] if pmid else [])+([f'PMCID:{pmcid}'] if pmcid else []):
+                  try:
+                      u='https://api.semanticscholar.org/graph/v1/paper/'+urllib.parse.quote(ident,safe=':')+'?fields=title,openAccessPdf,url,externalIds'
+                      r=s.get(u,timeout=25);r.raise_for_status();j=r.json();oa=j.get('openAccessPdf') or {};add(cands,'semantic_scholar',oa.get('url'));add(cands,'semantic_landing',j.get('url'))
+                      break
+                  except Exception as e:errors.append('S2:'+type(e).__name__+':'+str(e)[:100]);time.sleep(.4)
+              # Unpaywall
+              if doi:
+                  try:
+                      u=f'https://api.unpaywall.org/v2/{urllib.parse.quote(doi,safe="")}?email={email}';j=s.get(u,timeout=25).json()
+                      for loc in [j.get('best_oa_location'),j.get('first_oa_location')]+(j.get('oa_locations') or []):
+                          if loc:add(cands,'unpaywall_pdf',loc.get('url_for_pdf'));add(cands,'unpaywall_landing',loc.get('url'))
+                  except Exception as e:errors.append('Unpaywall:'+repr(e)[:100])
+              # OpenAlex
+              for ident in ([f'https://doi.org/{doi}'] if doi else [])+([f'https://pubmed.ncbi.nlm.nih.gov/{pmid}'] if pmid else []):
+                  try:
+                      u='https://api.openalex.org/works/'+urllib.parse.quote(ident,safe='')+'?mailto='+email;j=s.get(u,timeout=25).json()
+                      locs=[j.get('best_oa_location'),j.get('primary_location')]+(j.get('locations') or [])
+                      for loc in locs:
+                          if loc:add(cands,'openalex_pdf',loc.get('pdf_url'));add(cands,'openalex_landing',loc.get('landing_page_url'))
+                      break
+                  except Exception as e:errors.append('OpenAlex:'+repr(e)[:100])
+              # Crossref links and DOI content negotiation
+              if doi:
+                  try:
+                      u='https://api.crossref.org/works/'+urllib.parse.quote(doi,safe='');j=s.get(u,timeout=25).json().get('message',{})
+                      for l in j.get('link') or []:add(cands,'crossref_link',l.get('URL'))
+                  except Exception as e:errors.append('Crossref:'+repr(e)[:100])
+                  add(cands,'doi_pdf_accept','https://doi.org/'+doi)
+              # Europe PMC search full text URLs
+              q=(f'EXT_ID:{pmid}' if pmid else f'DOI:"{doi}"' if doi else f'PPR_ID:{pmcid}')
+              try:
+                  u='https://www.ebi.ac.uk/europepmc/webservices/rest/search?query='+urllib.parse.quote(q)+'&format=json&resultType=core';j=s.get(u,timeout=25).json()
+                  for rec in j.get('resultList',{}).get('result',[]):
+                      for ft in (rec.get('fullTextUrlList') or {}).get('fullTextUrl',[]):add(cands,'europepmc_fulltext',ft.get('url'))
+              except Exception as e:errors.append('EPMC:'+repr(e)[:100])
+              seen=set();result={**row,'status':'failed','method':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','match_score':'','error':''}
+              i=0
+              while i<len(cands) and i<90:
+                  method,url=cands[i];i+=1
+                  if not url or url in seen:continue
+                  seen.add(url)
+                  try:
+                      headers={}
+                      if method=='doi_pdf_accept':headers={'Accept':'application/pdf'}
+                      r=s.get(url,headers=headers,timeout=(12,50),allow_redirects=True,verify=False);info,err=validate(r.content,title)
+                      if info:
+                          p=pdfroot/f'{safe(row["key"],60)}_{safe(title)}_{method}.pdf';p.write_bytes(r.content);result.update(status='success',method=method,source_url=r.url,path=str(p),pages=info[0],size_bytes=info[1],sha256=info[2],match_score=round(info[3],3),error='');break
+                      ctype=(r.headers.get('content-type') or '').lower()
+                      if 'html' in ctype or r.text[:20].lstrip().startswith('<'):
+                          cands.extend(landing_links(r))
+                      errors.append(f'{method}:{r.status_code}:{ctype}:{err}:{r.url}')
+                  except Exception as e:errors.append(f'{method}:{type(e).__name__}:{str(e)[:130]}:{url}')
+              result['error']=' | '.join(errors)[:15000];results.append(result);print(f'[{idx}/{len(rows)}] {result["status"]} {row["key"]} {result.get("method","")} {result.get("pages","")}',flush=True);time.sleep(.3)
+          fields=[]
+          for r in results:
+              for k in r:
+                  if k not in fields:fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          summary={'total':len(results),'success':sum(r['status']=='success' for r in results),'failed':sum(r['status']!='success' for r in results),'pages':sum(int(r.get('pages') or 0) for r in results),'bytes':sum(int(r.get('size_bytes') or 0) for r in results)}
+          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          PY
+      - name: Upload repository results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-repository-discovery-results
+          path: repository_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
