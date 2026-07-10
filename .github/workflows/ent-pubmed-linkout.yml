@@ -1,0 +1,106 @@
+name: ENT PubMed LinkOut Retrieval
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pubmed_linkout_queue.json'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 pypdf urllib3
+      - name: Retrieve PDFs through PubMed LinkOut
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          import requests, urllib3
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+          rows=json.load(open('pubmed_linkout_queue.json',encoding='utf-8'))
+          out=pathlib.Path('pubmed_linkout_results');pdfroot=out/'pdf';pdfroot.mkdir(parents=True,exist_ok=True)
+          def safe(x,n=150):
+              x=re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',str(x or ''));return re.sub(r'\s+','_',x).strip('._ ')[:n] or 'untitled'
+          def words(x):return {w for w in re.findall(r'[a-z0-9]+',str(x).lower()) if len(w)>3 and w not in {'with','from','that','this','into','after','using','study','review','clinical','patients','guideline'}}
+          def validate(data,title):
+              if not data.lstrip().startswith(b'%PDF-'):return None,'not_pdf'
+              try:
+                  reader=PdfReader(io.BytesIO(data),strict=False);pages=len(reader.pages);text=' '.join((reader.pages[i].extract_text() or '') for i in range(min(pages,3)))
+                  score=len(words(title)&words(text))/max(1,len(words(title)))
+                  if text and score<0.20:return None,f'mismatch:{score:.2f}'
+                  return (pages,len(data),hashlib.sha256(data).hexdigest(),score),''
+              except Exception as e:return None,'pdf_error:'+repr(e)[:120]
+          def collect_urls(obj,found):
+              if isinstance(obj,dict):
+                  for k,v in obj.items():
+                      if k.lower() in {'url','urlname'} and isinstance(v,str) and v.startswith('http'):found.append(v)
+                      collect_urls(v,found)
+              elif isinstance(obj,list):
+                  for v in obj:collect_urls(v,found)
+          def html_links(resp):
+              ans=[]
+              try:
+                  soup=BeautifulSoup(resp.text,'html.parser')
+                  for m in soup.select('meta[name="citation_pdf_url"],meta[name="wkhealth_pdf_url"],meta[property="og:pdf"]'):
+                      if m.get('content'):ans.append(urllib.parse.urljoin(resp.url,m['content'].strip()))
+                  for a in soup.find_all('a',href=True):
+                      h=a['href'].strip()
+                      if '.pdf' in h.lower() or '/pdf/' in h.lower() or '/epdf/' in h.lower():ans.append(urllib.parse.urljoin(resp.url,h))
+              except Exception:pass
+              return list(dict.fromkeys(ans))[:30]
+          def one(row):
+              pmid=row['pmid'];title=row['title'];s=requests.Session();s.headers.update({'User-Agent':'ENT-Literature-Archive/1.0 (mailto:alice246991@gmail.com)','Accept':'text/html,application/pdf,*/*'})
+              result={**row,'status':'failed','method':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','match_score':'','linkout_urls':'','error':''};errors=[];urls=[]
+              try:
+                  api=f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&id={pmid}&cmd=llinks&retmode=json&tool=ent_literature_archive&email=alice246991%40gmail.com'
+                  r=s.get(api,timeout=(10,35));r.raise_for_status();data=r.json();collect_urls(data,urls)
+              except Exception as e:errors.append('LinkOut API '+type(e).__name__+':'+str(e)[:160])
+              urls=[u for u in dict.fromkeys(urls) if 'static.pubmed.gov' not in u and 'nih.gov/corehtml' not in u]
+              result['linkout_urls']=' | '.join(urls)
+              candidates=list(urls);seen=set();i=0
+              while i<len(candidates) and i<80:
+                  url=candidates[i];i+=1
+                  if url in seen:continue
+                  seen.add(url)
+                  try:
+                      rr=s.get(url,timeout=(10,45),allow_redirects=True,verify=False);info,err=validate(rr.content,title)
+                      if info:
+                          p=pdfroot/f'{pmid}_{safe(title)}.pdf';p.write_bytes(rr.content);result.update(status='success',method='PubMed_LinkOut',source_url=rr.url,path=str(p),pages=info[0],size_bytes=info[1],sha256=info[2],match_score=round(info[3],3),error='');return result
+                      ct=(rr.headers.get('content-type') or '').lower()
+                      if 'html' in ct or rr.text[:20].lstrip().startswith('<'):candidates.extend(html_links(rr))
+                      errors.append(f'{rr.status_code}:{ct}:{err}:{rr.url}')
+                  except Exception as e:errors.append(type(e).__name__+':'+str(e)[:120]+':'+url)
+              result['error']=' | '.join(errors)[:12000];return result
+          results=[]
+          with ThreadPoolExecutor(max_workers=6) as ex:
+              fs={ex.submit(one,r):r for r in rows}
+              for i,f in enumerate(as_completed(fs),1):
+                  x=f.result();results.append(x);print(f'[{i}/{len(rows)}] {x["status"]} PMID{x["pmid"]} {x.get("pages","")}',flush=True)
+          fields=[]
+          for r in results:
+              for k in r:
+                  if k not in fields:fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          summary={'total':len(results),'success':sum(r['status']=='success' for r in results),'failed':sum(r['status']!='success' for r in results),'pages':sum(int(r.get('pages') or 0) for r in results),'bytes':sum(int(r.get('size_bytes') or 0) for r in results)}
+          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          PY
+      - name: Upload LinkOut results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pubmed-linkout-results
+          path: pubmed_linkout_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
