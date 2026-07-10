@@ -1,0 +1,32 @@
+name: ENT Fast Concurrent Salvage
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'fast_salvage.trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  salvage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests urllib3 pypdf
+      - name: Run concurrent PDF salvage
+        run: python fast_ent_salvage.py
+      - name: Upload fast salvage results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-fast-concurrent-results
+          path: fast_salvage_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
