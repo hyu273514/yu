@@ -1,0 +1,107 @@
+name: ENT Exact Metadata PDF Retrieval
+on:
+  pull_request:
+    branches: [main]
+    paths: ['exact_meta_queue.json']
+permissions:
+  contents: read
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 pypdf urllib3
+      - name: Resolve official PDFs
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          import requests, urllib3
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+          rows=json.load(open('exact_meta_queue.json',encoding='utf-8'))
+          out=pathlib.Path('exact_meta_results'); pdfroot=out/'pdf'; pdfroot.mkdir(parents=True)
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36 ENT-Literature/1.0'
+          stop={'with','from','that','this','into','after','using','study','review','clinical','patients','guideline','journal','volume','pmc'}
+          def toks(x): return {w for w in re.findall(r'[a-z0-9]+',(x or '').lower()) if len(w)>3 and w not in stop}
+          def safe(x,n=130): return re.sub(r'[^\w.-]+','_',x or '',flags=re.UNICODE).strip('._')[:n] or 'paper'
+          def check(data,title):
+            if not data.lstrip().startswith(b'%PDF-'): return None,'not_pdf'
+            try:
+              r=PdfReader(io.BytesIO(data),strict=False); pages=len(r.pages)
+              text=' '.join((r.pages[i].extract_text() or '') for i in range(min(pages,4)))
+              a=toks(title); b=toks(text); score=len(a&b)/max(1,len(a))
+              if pages<2: return None,f'too_few_pages:{pages}'
+              if text and score<0.20: return None,f'title_mismatch:{score:.2f}'
+              return {'pages':pages,'size_bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'score':round(score,3)},''
+            except Exception as e: return None,'pdf_error:'+repr(e)[:150]
+          def add(lst,method,url):
+            if isinstance(url,str) and url.startswith(('http://','https://')): lst.append((method,url.strip()))
+          def links(resp):
+            ans=[]
+            try:
+              soup=BeautifulSoup(resp.text,'html.parser')
+              for m in soup.select('meta[name="citation_pdf_url"],meta[name="wkhealth_pdf_url"],meta[property="og:pdf"],link[type="application/pdf"]'):
+                add(ans,'html_meta',urllib.parse.urljoin(resp.url,m.get('content') or m.get('href') or ''))
+              for a in soup.find_all('a',href=True):
+                h=a['href'].strip(); txt=a.get_text(' ',strip=True).lower()
+                if '.pdf' in h.lower() or '/pdf/' in h.lower() or '/epdf/' in h.lower() or txt in {'pdf','download pdf','view pdf'}:
+                  add(ans,'html_link',urllib.parse.urljoin(resp.url,h))
+            except Exception: pass
+            return ans[:40]
+          def one(row):
+            s=requests.Session(); s.headers.update({'User-Agent':UA,'Accept-Language':'en-US,en;q=0.8'})
+            title=row['title']; doi=(row.get('doi') or '').strip(); cands=[]; errs=[]
+            for u in row.get('explicit') or []: add(cands,'explicit',u)
+            if doi:
+              add(cands,'doi','https://doi.org/'+doi)
+              add(cands,'springer',f'https://link.springer.com/content/pdf/{doi}.pdf')
+              add(cands,'thieme',f'https://www.thieme-connect.de/products/ejournals/pdf/{doi}.pdf')
+              try:
+                enc=urllib.parse.quote(doi,safe=''); cr=s.get('https://api.crossref.org/works/'+enc,timeout=25).json()['message']
+                add(cands,'crossref_url',cr.get('URL'))
+                for l in cr.get('link') or []: add(cands,'crossref_link',l.get('URL'))
+              except Exception as e: errs.append('crossref:'+repr(e)[:100])
+            if row.get('pmid'): add(cands,'pubmed','https://pubmed.ncbi.nlm.nih.gov/'+row['pmid']+'/')
+            seen=set(); result={**row,'status':'failed','method':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','title_score':'','error':''}; i=0
+            while i<len(cands) and i<100:
+              method,url=cands[i];i+=1
+              if url in seen: continue
+              seen.add(url)
+              try:
+                r=s.get(url,headers={'Accept':'application/pdf, text/html;q=0.9, */*;q=0.8'},timeout=(12,45),allow_redirects=True,verify=False)
+                info,err=check(r.content,title)
+                if info:
+                  p=pdfroot/f'{safe(row["id"],35)}_{safe(title)}.pdf';p.write_bytes(r.content)
+                  result.update(status='success',method=method,source_url=r.url,path=str(p),pages=info['pages'],size_bytes=info['size_bytes'],sha256=info['sha256'],title_score=info['score'],error='');return result
+                ct=(r.headers.get('content-type') or '').lower()
+                if 'html' in ct or r.content.lstrip()[:1]==b'<': cands.extend(links(r))
+                errs.append(f'{method}:{r.status_code}:{ct}:{err}:{r.url}')
+              except Exception as e: errs.append(f'{method}:{type(e).__name__}:{str(e)[:130]}:{url}')
+            result['error']=' | '.join(errs)[:20000];return result
+          results=[]
+          with ThreadPoolExecutor(max_workers=6) as ex:
+            futs={ex.submit(one,r):r['id'] for r in rows}
+            for n,f in enumerate(as_completed(futs),1):
+              x=f.result();results.append(x);print(f'[{n}/{len(rows)}] {x["status"]} {x["id"]} {x.get("pages","")} {x.get("method","")}',flush=True)
+          results.sort(key=lambda x:x['id']); fields=[]
+          for r in results:
+            for k in r:
+              if k not in fields: fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          summary={'total':len(results),'success':sum(x['status']=='success' for x in results),'failed':sum(x['status']!='success' for x in results),'pages':sum(int(x.get('pages') or 0) for x in results)}
+          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ent-exact-meta-results
+          path: exact_meta_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
