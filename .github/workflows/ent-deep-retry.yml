@@ -22,10 +22,37 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml pypdf
-      - name: Rebuild downloader
-        run: cat deep_retry.b64.part* | base64 --decode > deep_retry.py
+      - name: Rebuild and diagnose downloader
+        run: |
+          cat deep_retry.b64.part* | base64 --decode > deep_retry.py
+          sha256sum deep_retry.b64.part* > part_hashes.txt
+          wc -c deep_retry.b64.part* > part_sizes.txt
+          sha256sum deep_retry.py > script_hash.txt
+          if python -m py_compile deep_retry.py > compile.log 2>&1; then
+            echo 0 > compile_status.txt
+          else
+            echo 1 > compile_status.txt
+          fi
+      - name: Upload downloader diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-deep-diagnostics
+          path: |
+            deep_retry.py
+            part_hashes.txt
+            part_sizes.txt
+            script_hash.txt
+            compile.log
+            compile_status.txt
+          if-no-files-found: error
+          retention-days: 3
       - name: Validate downloader
-        run: python -m py_compile deep_retry.py
+        run: |
+          if [ "$(cat compile_status.txt)" != "0" ]; then
+            cat compile.log
+            exit 1
+          fi
       - name: Run deep open-access retrieval
         run: python deep_retry.py
       - name: Upload results
