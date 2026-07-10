@@ -1,0 +1,101 @@
+name: ENT PMC Bin PDF Retrieval
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pmc_bin_queue.json'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf urllib3
+      - name: Retrieve PMC self-uri PDFs from bin paths
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, time, urllib.parse
+          import requests, urllib3
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+          rows=json.load(open('pmc_bin_queue.json',encoding='utf-8'))
+          out=pathlib.Path('pmc_bin_results'); pdfroot=out/'pdf'; pdfroot.mkdir(parents=True,exist_ok=True)
+          session=requests.Session();session.headers.update({'User-Agent':'ENT-Literature-Archive/1.0 (mailto:alice246991@gmail.com)','Accept':'application/pdf,*/*;q=0.8'})
+          pmcids=[r['pmcid'].upper() for r in rows if r.get('pmcid')]
+          efetch='https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id='+','.join(x.replace('PMC','') for x in pmcids)+'&retmode=xml'
+          xml=session.get(efetch,timeout=(20,120)).content
+          (out/'batch.xml').write_bytes(xml)
+          soup=BeautifulSoup(xml,'xml')
+          articles={}
+          for art in soup.find_all('article'):
+              ids={x.get('pub-id-type'):x.get_text(strip=True) for x in art.find_all('article-id')}
+              pmcid=(ids.get('pmcid') or ids.get('pmc') or '')
+              if pmcid and not pmcid.upper().startswith('PMC'):pmcid='PMC'+pmcid
+              hrefs=[]
+              for su in art.find_all('self-uri'):
+                  href=su.get('xlink:href') or su.get('href')
+                  ctype=(su.get('content-type') or '').lower()
+                  if href and ('pdf' in ctype or href.lower().endswith('.pdf')):hrefs.append(href)
+              articles[pmcid.upper()]={'article':art,'ids':ids,'hrefs':list(dict.fromkeys(hrefs))}
+          def safe(x,n=160):
+              x=re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',str(x or ''));return re.sub(r'\s+','_',x).strip('._ ')[:n] or 'untitled'
+          def tokens(x):return {w for w in re.findall(r'[a-z0-9]+',str(x).lower()) if len(w)>3 and w not in {'with','from','that','this','into','after','using','study','review','clinical','patients','guideline','pmcid','pmc'}}
+          def validate(data,title):
+              if not data.lstrip().startswith(b'%PDF-'):return None,'not_pdf'
+              try:
+                  reader=PdfReader(io.BytesIO(data),strict=False); pages=len(reader.pages)
+                  text=' '.join((reader.pages[i].extract_text() or '') for i in range(min(pages,4)))
+                  score=len(tokens(title)&tokens(text))/max(1,len(tokens(title)))
+                  if text and score<0.18:return None,f'mismatch:{score:.2f}'
+                  return (pages,len(data),hashlib.sha256(data).hexdigest(),score,text[:500]),''
+              except Exception as e:return None,'pdf_error:'+repr(e)[:160]
+          results=[]
+          for index,row in enumerate(rows,1):
+              pmcid=(row.get('pmcid') or '').upper();title=row.get('title','');meta=articles.get(pmcid,{});hrefs=meta.get('hrefs',[]);errors=[];result={**row,'self_uri':' | '.join(hrefs),'status':'failed','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','match_score':'','error':''}
+              candidates=[]
+              for href in hrefs:
+                  q=urllib.parse.quote(href,safe='._-()')
+                  candidates += [
+                    f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/bin/{q}',
+                    f'https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/bin/{q}',
+                    f'https://europepmc.org/articles/{pmcid}/bin/{q}',
+                  ]
+              seen=set()
+              for url in candidates:
+                  if url in seen:continue
+                  seen.add(url)
+                  try:
+                      r=session.get(url,timeout=(12,50),allow_redirects=True,verify=False)
+                      info,err=validate(r.content,title)
+                      if info:
+                          p=pdfroot/f'{safe(pmcid,30)}_{safe(title)}.pdf';p.write_bytes(r.content)
+                          result.update(status='success',source_url=r.url,path=str(p),pages=info[0],size_bytes=info[1],sha256=info[2],match_score=round(info[3],3),error='');break
+                      errors.append(f'{r.status_code}:{r.headers.get("content-type","")}:{err}:{r.url}')
+                  except Exception as e:errors.append(f'{type(e).__name__}:{str(e)[:140]}:{url}')
+              result['error']=' | '.join(errors)[:12000];results.append(result);print(f'[{index}/{len(rows)}] {result["status"]} {pmcid} {hrefs} {result.get("pages","")}',flush=True);time.sleep(.15)
+          fields=[]
+          for r in results:
+              for k in r:
+                  if k not in fields:fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          summary={'total':len(results),'with_self_uri':sum(bool(r.get('self_uri')) for r in results),'success':sum(r['status']=='success' for r in results),'failed':sum(r['status']!='success' for r in results),'pages':sum(int(r.get('pages') or 0) for r in results),'bytes':sum(int(r.get('size_bytes') or 0) for r in results)}
+          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          PY
+      - name: Upload PMC bin results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pmc-bin-results
+          path: pmc_bin_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
