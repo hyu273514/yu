@@ -1,0 +1,224 @@
+name: ENT PMC EFetch Batch Archive
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pmc_efetch_batch.trigger'
+      - '.github/workflows/ent-pmc-efetch-batch.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf
+      - name: Batch retrieve NCBI PMC XML and render full text
+        run: |
+          python - <<'PY'
+          import csv, hashlib, html, json, pathlib, re, shutil, subprocess, time
+          import requests
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+
+          pmcids = [
+              'PMC4221774','PMC10105630','PMC6374094','PMC5337595','PMC6374080',
+              'PMC2699173','PMC6956409','PMC3975551','PMC10128256','PMC7335535',
+              'PMC7040130','PMC6942543','PMC2846828','PMC3577950','PMC5320920',
+              'PMC6265171','PMC3360444','PMC6954440','PMC3183377','PMC7108032',
+              'PMC4593511','PMC10997336','PMC3498014','PMC5550312','PMC11455860',
+              'PMC7154615','PMC6486127','PMC4466798','PMC10231305','PMC2943809',
+              'PMC6081282','PMC7145142','PMC8314660','PMC3618744','PMC3312594',
+              'PMC8134171'
+          ]
+          numbers = [re.sub(r'\D', '', value) for value in pmcids]
+          out = pathlib.Path('pmc_efetch_batch_results')
+          pdfroot = out / 'pdf'
+          xmlroot = out / 'xml'
+          htmlroot = out / 'html'
+          for path in (pdfroot, xmlroot, htmlroot):
+              path.mkdir(parents=True)
+          chrome = shutil.which('google-chrome') or shutil.which('google-chrome-stable') or shutil.which('chromium') or shutil.which('chromium-browser')
+          if not chrome:
+              raise SystemExit('Chrome/Chromium not found')
+
+          session = requests.Session()
+          session.headers.update({'User-Agent': 'ENT-PMC-EFetch-Batch/1.0 contact@example.com', 'Accept': 'text/xml'})
+          url = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
+          response = None
+          for attempt in range(6):
+              response = session.post(url, data={'db': 'pmc', 'id': ','.join(numbers), 'retmode': 'xml'}, timeout=(20, 180))
+              if response.status_code != 429:
+                  response.raise_for_status()
+                  break
+              time.sleep(4 + attempt * 5)
+          if response is None or response.status_code == 429:
+              raise SystemExit('NCBI batch EFetch remained rate limited')
+          batch_xml = response.content
+          (out / 'batch.xml').write_bytes(batch_xml)
+          soup = BeautifulSoup(batch_xml, 'xml')
+          article_map = {}
+          for article in soup.find_all('article'):
+              pmc_node = article.find('article-id', attrs={'pub-id-type': 'pmc'})
+              if not pmc_node:
+                  continue
+              value = re.sub(r'\D', '', pmc_node.get_text(' ', strip=True))
+              article_map['PMC' + value] = article
+
+          def safe(value, limit=175):
+              value = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', '_', value or '')
+              return re.sub(r'\s+', '_', value).strip('._ ')[:limit] or 'untitled'
+
+          def pdf_info(path):
+              try:
+                  data = path.read_bytes()
+                  if not data.lstrip().startswith(b'%PDF-'):
+                      return None
+                  reader = PdfReader(path, strict=False)
+                  return len(reader.pages), len(data), hashlib.sha256(data).hexdigest()
+              except Exception:
+                  return None
+
+          def article_metadata(article, pmcid):
+              title_node = article.find('article-title')
+              title = title_node.get_text(' ', strip=True) if title_node else pmcid
+              doi_node = article.find('article-id', attrs={'pub-id-type': 'doi'})
+              pmid_node = article.find('article-id', attrs={'pub-id-type': 'pmid'})
+              doi = doi_node.get_text(' ', strip=True) if doi_node else ''
+              pmid = pmid_node.get_text(' ', strip=True) if pmid_node else ''
+              journal_node = article.find('journal-title') or article.find('journal-id')
+              journal = journal_node.get_text(' ', strip=True) if journal_node else ''
+              year_node = article.find('pub-date')
+              year = year_node.find('year').get_text(' ', strip=True) if year_node and year_node.find('year') else ''
+              authors = []
+              for contrib in article.find_all('contrib', attrs={'contrib-type': 'author'}):
+                  name = contrib.find('name')
+                  if name:
+                      given = name.find('given-names')
+                      surname = name.find('surname')
+                      value = ' '.join(filter(None, [given.get_text(' ', strip=True) if given else '', surname.get_text(' ', strip=True) if surname else '']))
+                      if value:
+                          authors.append(value)
+                  elif contrib.find('collab'):
+                      authors.append(contrib.find('collab').get_text(' ', strip=True))
+              return title, doi, pmid, journal, year, authors
+
+          def make_html(article, pmcid):
+              title, doi, pmid, journal, year, authors = article_metadata(article, pmcid)
+              abstract_parts = []
+              abstract = article.find('abstract')
+              if abstract:
+                  for node in abstract.find_all(['title', 'p'], recursive=True):
+                      text = node.get_text(' ', strip=True)
+                      if text:
+                          abstract_parts.append(f'<h3>{html.escape(text)}</h3>' if node.name == 'title' else f'<p>{html.escape(text)}</p>')
+              body = article.find('body')
+              body_parts = []
+              if body:
+                  for section in body.find_all('sec', recursive=False):
+                      section_title = section.find('title', recursive=False)
+                      if section_title:
+                          body_parts.append(f'<h2>{html.escape(section_title.get_text(" ", strip=True))}</h2>')
+                      for node in section.find_all(['p', 'list-item', 'caption'], recursive=True):
+                          if node.find_parent('ref-list') or node.find_parent('table-wrap'):
+                              continue
+                          text = node.get_text(' ', strip=True)
+                          if not text:
+                              continue
+                          if node.name == 'list-item':
+                              body_parts.append(f'<li>{html.escape(text)}</li>')
+                          elif node.name == 'caption':
+                              body_parts.append(f'<p class="caption">{html.escape(text)}</p>')
+                          else:
+                              body_parts.append(f'<p>{html.escape(text)}</p>')
+                  if not body_parts:
+                      for node in body.find_all(['title', 'p', 'list-item', 'caption'], recursive=True):
+                          text = node.get_text(' ', strip=True)
+                          if text:
+                              tag = 'h2' if node.name == 'title' else ('li' if node.name == 'list-item' else 'p')
+                              body_parts.append(f'<{tag}>{html.escape(text)}</{tag}>')
+              references = []
+              for ref in article.find_all('ref'):
+                  text = ref.get_text(' ', strip=True)
+                  if text:
+                      references.append(f'<li>{html.escape(text)}</li>')
+              source = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id={re.sub(r"\\D", "", pmcid)}&retmode=xml'
+              document = f'''<!doctype html><html><head><meta charset="utf-8"><style>
+              @page{{size:A4;margin:16mm}} body{{font-family:Arial,"Noto Sans",sans-serif;line-height:1.45;font-size:10.5pt;color:#111}}
+              h1{{font-size:20pt;line-height:1.2}} h2{{font-size:14pt;margin-top:1.4em}} h3{{font-size:11.5pt}}
+              p{{text-align:justify}} li{{margin-bottom:4px}} .meta,.source{{color:#555;font-size:9pt}} .caption{{font-style:italic}}
+              </style></head><body><h1>{html.escape(title)}</h1><p class="meta">{html.escape(', '.join(authors))}</p>
+              <p class="meta">{html.escape(journal)} {html.escape(year)} &nbsp; PMID: {html.escape(pmid)} &nbsp; PMCID: {pmcid} &nbsp; DOI: {html.escape(doi)}</p>
+              <h2>Abstract</h2>{''.join(abstract_parts)}<h2>Full Text</h2>{''.join(body_parts)}
+              <h2>References</h2><ol>{''.join(references)}</ol>
+              <p class="source">Archival PDF generated from official NCBI PMC EFetch XML: {html.escape(source)}</p></body></html>'''
+              meta = {'title': title, 'doi': doi, 'pmid': pmid, 'journal': journal, 'year': year, 'authors': '; '.join(authors), 'has_body': body is not None and len(body_parts) > 0, 'body_paragraphs': len(body_parts), 'abstract_paragraphs': len(abstract_parts), 'references': len(references), 'source_url': source}
+              return document, meta
+
+          def chrome_print(html_path, pdf_path):
+              command = [chrome, '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--virtual-time-budget=3000', f'--print-to-pdf={pdf_path.resolve()}', html_path.resolve().as_uri()]
+              subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=100, check=False)
+              return pdf_info(pdf_path)
+
+          results = []
+          for index, pmcid in enumerate(pmcids, 1):
+              result = {'pmcid': pmcid, 'status': 'failed', 'version': '', 'title': '', 'doi': '', 'pmid': '', 'journal': '', 'year': '', 'authors': '', 'has_body': False, 'body_paragraphs': 0, 'abstract_paragraphs': 0, 'references': 0, 'source_url': '', 'path': '', 'pages': '', 'size_bytes': '', 'sha256': '', 'error': ''}
+              article = article_map.get(pmcid)
+              if article is None:
+                  result['error'] = 'PMCID not returned in batch EFetch XML.'
+                  results.append(result)
+                  continue
+              (xmlroot / f'{pmcid}.xml').write_text(str(article), encoding='utf-8')
+              document, meta = make_html(article, pmcid)
+              result.update(meta)
+              if not meta['has_body']:
+                  result['status'] = 'no_full_body'
+                  result['error'] = 'NCBI EFetch article has no body; metadata/abstract only.'
+                  results.append(result)
+                  print(f'[{index}/{len(pmcids)}] no_full_body {pmcid}', flush=True)
+                  continue
+              stem = safe(f'{meta["year"] or "year_unknown"}_{meta["title"]}_NCBI_PMC全文归档')
+              html_path = htmlroot / f'{pmcid}_{stem}.html'
+              pdf_path = pdfroot / f'{pmcid}_{stem}.pdf'
+              html_path.write_text(document, encoding='utf-8')
+              info = chrome_print(html_path, pdf_path)
+              if info:
+                  result.update({'status': 'success', 'version': 'NCBI_EFetch_JATS全文归档PDF', 'path': str(pdf_path), 'pages': info[0], 'size_bytes': info[1], 'sha256': info[2], 'error': ''})
+              else:
+                  result['error'] = 'Chrome did not create a valid PDF.'
+              results.append(result)
+              print(f'[{index}/{len(pmcids)}] {result["status"]} {pmcid} body={result["body_paragraphs"]} pages={result["pages"]}', flush=True)
+
+          fields = list(results[0].keys())
+          with open(out / 'report.csv', 'w', encoding='utf-8-sig', newline='') as file:
+              writer = csv.DictWriter(file, fieldnames=fields)
+              writer.writeheader()
+              writer.writerows(results)
+          summary = {
+              'requested': len(pmcids),
+              'articles_returned': len(article_map),
+              'success': sum(item['status'] == 'success' for item in results),
+              'no_full_body': sum(item['status'] == 'no_full_body' for item in results),
+              'failed': sum(item['status'] == 'failed' for item in results),
+              'pages': sum(int(item.get('pages') or 0) for item in results),
+              'bytes': sum(int(item.get('size_bytes') or 0) for item in results)
+          }
+          (out / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+          print(summary)
+          PY
+      - name: Upload batch EFetch results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pmc-efetch-batch-results
+          path: pmc_efetch_batch_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
