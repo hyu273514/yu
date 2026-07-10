@@ -1,0 +1,38 @@
+name: ENT Deep Retry
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deep_retry.b64.part*'
+      - '.github/workflows/ent-deep-retry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf
+      - name: Rebuild downloader
+        run: cat deep_retry.b64.part* | base64 --decode > deep_retry.py
+      - name: Validate downloader
+        run: python -m py_compile deep_retry.py
+      - name: Run deep open-access retrieval
+        run: python deep_retry.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-deep-results
+          path: deep_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
