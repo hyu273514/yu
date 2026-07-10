@@ -1,0 +1,130 @@
+name: ENT Precise PDF Fix
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'precise_fix_queue.json'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 pypdf urllib3
+      - name: Retrieve exact PDFs
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, time, urllib.parse
+          import requests, urllib3
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+          rows=json.load(open('precise_fix_queue.json',encoding='utf-8'))
+          out=pathlib.Path('precise_fix_results'); pdfroot=out/'pdf'; pdfroot.mkdir(parents=True,exist_ok=True)
+          s=requests.Session(); s.headers.update({'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36','Accept':'text/html,application/pdf,*/*','Referer':'https://pubmed.ncbi.nlm.nih.gov/'})
+
+          def safe(x,n=150):
+              x=re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',str(x or ''))
+              return re.sub(r'\s+','_',x).strip('._ ')[:n] or 'untitled'
+          def tokens(x):
+              return {w for w in re.findall(r'[a-z0-9]+',str(x).lower()) if len(w)>3 and w not in {'with','from','that','this','into','after','using','study','review','clinical','patients'}}
+          def validate(data,title,strict=True):
+              if not data.lstrip().startswith(b'%PDF-'): return None,'not_pdf'
+              try:
+                  r=PdfReader(io.BytesIO(data),strict=False); pages=len(r.pages)
+                  txt=' '.join((r.pages[i].extract_text() or '') for i in range(min(pages,3)))
+                  score=len(tokens(title)&tokens(txt))/max(1,len(tokens(title)))
+                  if strict and txt and score<0.22: return None,f'title_mismatch:{score:.2f}'
+                  return (pages,len(data),hashlib.sha256(data).hexdigest(),score,txt[:300]),''
+              except Exception as e:return None,'pdf_error:'+repr(e)[:150]
+          def request(url):
+              return s.get(url,timeout=(12,45),allow_redirects=True,verify=False)
+          def html_pdf_links(resp):
+              links=[]
+              try:
+                  soup=BeautifulSoup(resp.text,'html.parser')
+                  for m in soup.select('meta[name="citation_pdf_url"],meta[name="wkhealth_pdf_url"],meta[property="og:pdf"]'):
+                      if m.get('content'): links.append(urllib.parse.urljoin(resp.url,m['content'].strip()))
+                  for a in soup.find_all('a',href=True):
+                      h=a['href'].strip()
+                      if '.pdf' in h.lower() or '/pdf/' in h.lower() or '/epdf/' in h.lower():
+                          links.append(urllib.parse.urljoin(resp.url,h))
+              except Exception: pass
+              return list(dict.fromkeys(links))[:20]
+
+          results=[]
+          for idx,row in enumerate(rows,1):
+              pmcid=row['pmcid']; num=pmcid.replace('PMC',''); title=row.get('title',''); candidates=[]
+              for u in row.get('publisher_urls',[]): candidates.append(('publisher',u,True))
+              for href in row.get('hrefs',[]):
+                  q=urllib.parse.quote(href,safe='._-')
+                  variants=[
+                    f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/bin/{q}',
+                    f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/{q}',
+                    f'https://pmc.ncbi.nlm.nih.gov/articles/instance/{num}/bin/{q}',
+                    f'https://pmc.ncbi.nlm.nih.gov/articles/instance/{num}/pdf/{q}',
+                    f'https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/bin/{q}',
+                    f'https://europepmc.org/articles/{pmcid}/bin/{q}',
+                    f'https://europepmc.org/articles/{pmcid}/pdf/{q}',
+                  ]
+                  for u in variants:candidates.append(('pmc_self_uri',u,False))
+              candidates += [
+                ('europepmc_render',f'https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf',False),
+                ('europepmc_pdf',f'https://europepmc.org/api/getPdf?pmcid={pmcid}',False),
+              ]
+              seen=set(); errors=[]; result={**row,'status':'failed','method':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','match_score':'','error':''}
+              for method,url,strict in candidates:
+                  if not url or url in seen: continue
+                  seen.add(url)
+                  try:
+                      resp=request(url); ctype=(resp.headers.get('content-type') or '').lower()
+                      info,err=validate(resp.content,title,strict)
+                      if info:
+                          dest=pdfroot/f'{pmcid}_{safe(title)}_{method}.pdf'; dest.write_bytes(resp.content)
+                          result.update(status='success',method=method,source_url=resp.url,path=str(dest),pages=info[0],size_bytes=info[1],sha256=info[2],match_score=round(info[3],3),error='')
+                          break
+                      if 'html' in ctype or resp.text[:20].lower().lstrip().startswith('<'):
+                          for nested in html_pdf_links(resp):
+                              if nested in seen: continue
+                              seen.add(nested)
+                              try:
+                                  rr=request(nested); inf2,er2=validate(rr.content,title,True)
+                                  if inf2:
+                                      dest=pdfroot/f'{pmcid}_{safe(title)}_{method}_nested.pdf'; dest.write_bytes(rr.content)
+                                      result.update(status='success',method=method+'_nested',source_url=rr.url,path=str(dest),pages=inf2[0],size_bytes=inf2[1],sha256=inf2[2],match_score=round(inf2[3],3),error='')
+                                      break
+                                  errors.append(f'{method}_nested {rr.status_code} {rr.headers.get("content-type","")} {er2} {nested}')
+                              except Exception as e: errors.append(f'{method}_nested {type(e).__name__}:{str(e)[:140]} {nested}')
+                          if result['status']=='success': break
+                      errors.append(f'{method} {resp.status_code} {ctype} {err} {resp.url}')
+                  except Exception as e: errors.append(f'{method} {type(e).__name__}:{str(e)[:180]} {url}')
+              result['error']=' | '.join(errors)[:12000]
+              results.append(result); print(f'[{idx}/{len(rows)}] {result["status"]} {pmcid} {result.get("method","")} {result.get("pages","")}',flush=True)
+
+          fields=[]
+          for r in results:
+              for k in r:
+                  if k not in fields: fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          summary={'total':len(results),'success':sum(r['status']=='success' for r in results),'failed':sum(r['status']!='success' for r in results),'pages':sum(int(r.get('pages') or 0) for r in results),'bytes':sum(int(r.get('size_bytes') or 0) for r in results)}
+          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          PY
+      - name: Upload precise results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-precise-pdf-results
+          path: precise_fix_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
