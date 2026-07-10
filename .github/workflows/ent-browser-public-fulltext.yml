@@ -1,0 +1,187 @@
+name: ENT Browser Public Fulltext Retrieval
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'browser_public_queue.json'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install playwright pypdf
+          python -m playwright install --with-deps chromium
+      - name: Retrieve public PDFs or archive validated official full text
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, urllib.parse
+          from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+          from pypdf import PdfReader
+
+          rows=json.load(open('browser_public_queue.json',encoding='utf-8'))
+          out=pathlib.Path('browser_public_results'); pdfroot=out/'pdf'; pdfroot.mkdir(parents=True,exist_ok=True)
+          stop={'with','from','that','this','into','after','using','study','review','clinical','patients','guideline','journal','volume','article','management','treatment'}
+          reject_phrases=[
+            'verify you are human','recaptcha','captcha','attention required','access denied',
+            'this is a preview of subscription content','purchase this article','buy now',
+            'you do not have access','sign in to access','institutional access required'
+          ]
+          section_words=['abstract','introduction','background','methods','methodology','results','discussion','conclusion','recommendations','references','case presentation','diagnosis','treatment']
+
+          def toks(x):
+            return {w for w in re.findall(r'[a-z0-9]+',(x or '').lower()) if len(w)>3 and w not in stop}
+          def safe(x,n=145):
+            return re.sub(r'[^\w.-]+','_',x or '',flags=re.UNICODE).strip('._')[:n] or 'paper'
+          def pdf_check(data,title,min_pages=2):
+            if not data or not data.lstrip().startswith(b'%PDF-'): return None,'not_pdf'
+            try:
+              r=PdfReader(io.BytesIO(data),strict=False); pages=len(r.pages)
+              text=' '.join((r.pages[i].extract_text() or '') for i in range(min(pages,5)))
+              a=toks(title); b=toks(text); score=len(a&b)/max(1,len(a))
+              if pages<min_pages: return None,f'too_few_pages:{pages}'
+              if text and score<0.18: return None,f'title_mismatch:{score:.2f}'
+              return {'pages':pages,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'score':round(score,3),'sample_chars':len(text)},''
+            except Exception as e: return None,'pdf_error:'+repr(e)[:160]
+          def unique(seq):
+            seen=set(); out=[]
+            for x in seq:
+              if not x or x in seen: continue
+              seen.add(x);out.append(x)
+            return out
+          def page_pdf_candidates(page,base):
+            vals=[]
+            selectors=[
+              'meta[name="citation_pdf_url"]','meta[name="wkhealth_pdf_url"]','meta[property="og:pdf"]',
+              'link[type="application/pdf"]','link[rel="alternate"][type="application/pdf"]'
+            ]
+            for sel in selectors:
+              for el in page.locator(sel).all():
+                v=el.get_attribute('content') or el.get_attribute('href')
+                if v: vals.append(urllib.parse.urljoin(base,v))
+            for el in page.locator('a[href]').all():
+              href=el.get_attribute('href') or ''
+              txt=(el.inner_text(timeout=1500) or '').strip().lower()
+              h=href.lower()
+              if '.pdf' in h or '/pdf/' in h or '/epdf/' in h or txt in {'pdf','download pdf','view pdf','full text pdf'} or 'download pdf' in txt:
+                vals.append(urllib.parse.urljoin(base,href))
+            return unique(vals)[:60]
+          def try_pdf_url(context,page,url,title,referer=''):
+            attempts=[]
+            # First navigate with a browser page so JavaScript, cookies and redirects are handled normally.
+            try:
+              p=context.new_page()
+              resp=p.goto(url,wait_until='domcontentloaded',timeout=60000,referer=referer or None)
+              if resp:
+                ct=(resp.headers.get('content-type') or '').lower()
+                try: data=resp.body()
+                except Exception: data=b''
+                info,err=pdf_check(data,title)
+                attempts.append(f'browser:{resp.status}:{ct}:{err}:{resp.url}')
+                if info:
+                  p.close(); return data,info,resp.url,attempts
+              p.close()
+            except Exception as e: attempts.append('browser:'+type(e).__name__+':'+str(e)[:170]+':'+url)
+            # Then use the browser context request object, which shares cookies from the page visit.
+            try:
+              headers={'Accept':'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8'}
+              if referer: headers['Referer']=referer
+              rr=context.request.get(url,headers=headers,timeout=60000,fail_on_status_code=False)
+              data=rr.body(); ct=(rr.headers.get('content-type') or '').lower(); info,err=pdf_check(data,title)
+              attempts.append(f'context_request:{rr.status}:{ct}:{err}:{rr.url}')
+              if info: return data,info,rr.url,attempts
+            except Exception as e: attempts.append('context_request:'+type(e).__name__+':'+str(e)[:170]+':'+url)
+            return None,None,'',attempts
+          def inspect_fulltext(page,title):
+            try:
+              text=page.locator('body').inner_text(timeout=15000)
+            except Exception:
+              text=''
+            low=text.lower(); chars=len(text); score=len(toks(title)&toks(text))/max(1,len(toks(title)))
+            bad=[p for p in reject_phrases if p in low]
+            headings=[]
+            try:
+              headings=[(x.inner_text(timeout=1000) or '').strip() for x in page.locator('h1,h2,h3').all()]
+            except Exception: pass
+            combined=(' '.join(headings)+' '+low).lower()
+            sections=sum(1 for w in section_words if w in combined)
+            # Full text must be substantial. Case reports can be shorter but should still have several structured sections.
+            valid=chars>=6500 and score>=0.18 and sections>=3 and not bad
+            return valid,{'text_chars':chars,'title_score':round(score,3),'sections':sections,'reject_hits':' | '.join(bad),'headings':' | '.join(headings[:30])}
+
+          results=[]
+          with sync_playwright() as pw:
+            browser=pw.chromium.launch(headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
+            for idx,row in enumerate(rows,1):
+              context=browser.new_context(
+                accept_downloads=True,
+                user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                locale='en-US',viewport={'width':1440,'height':1200},
+                extra_http_headers={'Accept-Language':'en-US,en;q=0.9'}
+              )
+              page=context.new_page(); title=row['title']; errors=[]; result={**row,'status':'failed','version':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','title_score':'','text_chars':'','sections':'','error':''}
+              saved=False
+              for landing in row.get('landings') or []:
+                if saved: break
+                try:
+                  resp=page.goto(landing,wait_until='domcontentloaded',timeout=70000)
+                  page.wait_for_timeout(3500)
+                  current=page.url
+                  if resp:
+                    try: data=resp.body()
+                    except Exception: data=b''
+                    info,err=pdf_check(data,title)
+                    errors.append(f'landing_response:{resp.status}:{resp.headers.get("content-type","")}:{err}:{current}')
+                    if info:
+                      p=pdfroot/f'{safe(row["id"],45)}_{safe(title)}_publisher.pdf';p.write_bytes(data)
+                      result.update(status='success',version='出版社/学会原版PDF',source_url=current,path=str(p),pages=info['pages'],size_bytes=info['bytes'],sha256=info['sha256'],title_score=info['score']);saved=True;break
+                  candidates=page_pdf_candidates(page,current)
+                  # Also include known exact candidates supplied in the queue.
+                  candidates=unique((row.get('pdf_candidates') or [])+candidates)
+                  for cand in candidates:
+                    data,info,final_url,attempts=try_pdf_url(context,page,cand,title,current);errors.extend(attempts)
+                    if info:
+                      p=pdfroot/f'{safe(row["id"],45)}_{safe(title)}_publisher.pdf';p.write_bytes(data)
+                      result.update(status='success',version='出版社/学会原版PDF',source_url=final_url,path=str(p),pages=info['pages'],size_bytes=info['bytes'],sha256=info['sha256'],title_score=info['score']);saved=True;break
+                  if saved: break
+                  # If the official page itself exposes a complete, public article, archive it as a clearly labeled web rendition.
+                  valid,meta=inspect_fulltext(page,title);errors.append('fulltext_check:'+json.dumps(meta,ensure_ascii=False))
+                  if valid:
+                    raw=page.pdf(format='A4',print_background=True,margin={'top':'12mm','bottom':'12mm','left':'12mm','right':'12mm'})
+                    info,err=pdf_check(raw,title,min_pages=3);errors.append('page_pdf:'+err)
+                    if info:
+                      p=pdfroot/f'{safe(row["id"],45)}_{safe(title)}_official_web_archive.pdf';p.write_bytes(raw)
+                      result.update(status='success',version='官方开放网页全文归档PDF',source_url=current,path=str(p),pages=info['pages'],size_bytes=info['bytes'],sha256=info['sha256'],title_score=info['score'],text_chars=meta['text_chars'],sections=meta['sections']);saved=True;break
+                except PlaywrightTimeoutError as e: errors.append('landing_timeout:'+str(e)[:160]+':'+landing)
+                except Exception as e: errors.append('landing:'+type(e).__name__+':'+str(e)[:180]+':'+landing)
+              result['error']=' | '.join(errors)[:30000];results.append(result)
+              print(f'[{idx}/{len(rows)}] {result["status"]} {row["id"]} {result.get("version","")} {result.get("pages","")}',flush=True)
+              context.close()
+            browser.close()
+          fields=[]
+          for r in results:
+            for k in r:
+              if k not in fields: fields.append(k)
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          summary={'total':len(results),'success':sum(r['status']=='success' for r in results),'failed':sum(r['status']!='success' for r in results),'publisher_pdf':sum(r.get('version')=='出版社/学会原版PDF' for r in results),'official_web_archive':sum(r.get('version')=='官方开放网页全文归档PDF' for r in results),'pages':sum(int(r.get('pages') or 0) for r in results)}
+          (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');print(summary)
+          PY
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-browser-public-results
+          path: browser_public_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
