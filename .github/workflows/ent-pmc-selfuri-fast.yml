@@ -1,0 +1,94 @@
+name: ENT PMC Exact PDF Fast
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pmc_selfuri_fast.trigger'
+      - '.github/workflows/ent-pmc-selfuri-fast.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pypdf
+      - name: Fast concurrent exact PMC PDF retrieval
+        run: |
+          python - <<'PY'
+          import csv, hashlib, io, json, pathlib, re, time, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          import requests
+          from bs4 import BeautifulSoup
+          from pypdf import PdfReader
+
+          pmcids=['PMC4221774','PMC10105630','PMC6374094','PMC5337595','PMC6374080','PMC2699173','PMC6956409','PMC3975551','PMC10128256','PMC7335535','PMC7040130','PMC6942543','PMC2846828','PMC3577950','PMC5320920','PMC6265171','PMC3360444','PMC6954440','PMC3183377','PMC7108032','PMC4593511','PMC10997336','PMC3498014','PMC5550312','PMC11455860','PMC7154615','PMC6486127','PMC4466798','PMC10231305','PMC2943809','PMC6081282','PMC7145142','PMC8314660','PMC3618744','PMC3312594','PMC8134171']
+          nums=[re.sub(r'\D','',x) for x in pmcids]
+          out=pathlib.Path('pmc_selfuri_fast_results');pdfroot=out/'pdf';pdfroot.mkdir(parents=True)
+          s=requests.Session();s.headers.update({'User-Agent':'ENT-PMC-Exact-PDF-Fast/1.0 contact@example.com','Accept':'application/pdf,*/*;q=0.5'})
+          for attempt in range(6):
+              r=s.post('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi',data={'db':'pmc','id':','.join(nums),'retmode':'xml'},timeout=(20,180))
+              if r.status_code!=429:r.raise_for_status();break
+              time.sleep(4+attempt*4)
+          soup=BeautifulSoup(r.content,'xml'); amap={}
+          for a in soup.find_all('article'):
+              n=a.find('article-id',attrs={'pub-id-type':'pmcid'})
+              if n:amap[n.get_text(strip=True).upper()]=a
+          def valid(data):
+              if not data.lstrip().startswith(b'%PDF-'):return None
+              try:
+                  q=PdfReader(io.BytesIO(data),strict=False);return len(q.pages) if len(q.pages)>0 else None
+              except:return None
+          def safe(x):return re.sub(r'[\\/:*?"<>|\x00-\x1f]+','_',x or '')[:175]
+          def one(pmcid):
+              a=amap.get(pmcid);res={'pmcid':pmcid,'status':'failed','title':'','doi':'','pmid':'','year':'','hrefs':'','source_url':'','path':'','pages':'','size_bytes':'','sha256':'','error':''}
+              if not a:res['error']='not returned';return res
+              t=a.find('article-title');title=t.get_text(' ',strip=True) if t else pmcid
+              d=a.find('article-id',attrs={'pub-id-type':'doi'});doi=d.get_text(strip=True) if d else ''
+              p=a.find('article-id',attrs={'pub-id-type':'pmid'});pmid=p.get_text(strip=True) if p else ''
+              yd=a.find('pub-date');year=yd.find('year').get_text(strip=True) if yd and yd.find('year') else ''
+              hrefs=[]
+              for n in a.find_all('self-uri'):
+                  h=n.get('xlink:href') or n.get('href');ct=(n.get('content-type') or '').lower();xt=(n.get('xlink:title') or '').lower()
+                  if h and ('pdf' in ct or 'pdf' in xt or h.lower().endswith('.pdf')) and h not in hrefs:hrefs.append(h)
+              res.update({'title':title,'doi':doi,'pmid':pmid,'year':year,'hrefs':' | '.join(hrefs)})
+              errors=[]
+              sess=requests.Session();sess.headers.update({'User-Agent':'ENT-PMC-Exact-PDF-Fast/1.0 contact@example.com','Accept':'application/pdf,*/*;q=0.5'})
+              for href in hrefs:
+                  h=urllib.parse.quote(href,safe='._-()')
+                  urls=[f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/{h}',f'https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/bin/{h}',f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/bin/{h}',f'https://europepmc.org/articles/{pmcid}/bin/{h}']
+                  for u in urls:
+                      try:
+                          z=sess.get(u,timeout=(8,18),allow_redirects=True);pages=valid(z.content)
+                          if pages:
+                              path=pdfroot/(safe(f'{year}_{title}_{pmcid}_PMC_original')+'.pdf');path.write_bytes(z.content)
+                              res.update({'status':'success','source_url':z.url,'path':str(path),'pages':pages,'size_bytes':len(z.content),'sha256':hashlib.sha256(z.content).hexdigest(),'error':''});return res
+                          errors.append(f'{z.status_code}:{z.headers.get("content-type","")}:{u}')
+                      except Exception as e:errors.append(f'{type(e).__name__}:{u}')
+              res['error']=' | '.join(errors[-10:]);return res
+          results=[]
+          with ThreadPoolExecutor(max_workers=8) as ex:
+              futs={ex.submit(one,p):p for p in pmcids}
+              for i,f in enumerate(as_completed(futs),1):
+                  x=f.result();results.append(x);print(f'[{i}/{len(pmcids)}] {x["status"]} {x["pmcid"]} {x.get("pages","")}',flush=True)
+          results.sort(key=lambda x:x['pmcid']);fields=list(results[0])
+          with open(out/'report.csv','w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(results)
+          sm={'total':len(results),'success':sum(x['status']=='success' for x in results),'failed':sum(x['status']!='success' for x in results),'pages':sum(int(x.get('pages') or 0) for x in results),'bytes':sum(int(x.get('size_bytes') or 0) for x in results)}
+          (out/'summary.json').write_text(json.dumps(sm,ensure_ascii=False,indent=2),encoding='utf-8');print(sm)
+          PY
+      - name: Upload fast exact results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pmc-selfuri-fast-results
+          path: pmc_selfuri_fast_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
