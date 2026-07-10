@@ -1,0 +1,32 @@
+name: ENT PubMed LinkOut Retry
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'linkout_retry.trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 pypdf urllib3
+      - name: Run rate-limited LinkOut retrieval
+        run: python pubmed_linkout_retry.py
+      - name: Upload LinkOut retry results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ent-pubmed-linkout-retry-results
+          path: pubmed_linkout_retry_results
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
